@@ -23,7 +23,11 @@ pub struct Detected {
 }
 
 fn d(key: &'static str, label: &'static str, category: Category) -> Detected {
-    Detected { key, label, category }
+    Detected {
+        key,
+        label,
+        category,
+    }
 }
 
 /// Detect a framework/service from a process name and its command line.
@@ -66,8 +70,12 @@ pub fn from_process(name: &str, cmd: &str) -> Option<Detected> {
     if has("next-server") || has("next dev") || has("/.bin/next") || has("next start") {
         return Some(d("nextjs", "Next.js", Category::Frontend));
     }
-    if has("node_modules/vite") || has("/.bin/vite") || cmd_l.ends_with(" vite") || has("vite.js")
-        || has("vite dev") || has("vite --")
+    if has("node_modules/vite")
+        || has("/.bin/vite")
+        || cmd_l.ends_with(" vite")
+        || has("vite.js")
+        || has("vite dev")
+        || has("vite --")
     {
         return Some(d("vite", "Vite", Category::Frontend));
     }
@@ -322,8 +330,12 @@ pub fn is_noise(name: &str) -> bool {
         return true;
     }
     // Browsers & their helpers
-    const BROWSERS: &[&str] = &["chrome", "safari", "firefox", "arc", "brave", "edge", "opera", "dia"];
-    if BROWSERS.iter().any(|b| n == *b || n.starts_with(&format!("{b} ")) || n.contains("helper"))
+    const BROWSERS: &[&str] = &[
+        "chrome", "safari", "firefox", "arc", "brave", "edge", "opera", "dia",
+    ];
+    if BROWSERS
+        .iter()
+        .any(|b| n == *b || n.starts_with(&format!("{b} ")) || n.contains("helper"))
         && !n.contains("node")
     {
         // "helper" alone is too broad; require browser-ish or Electron helper names
@@ -341,7 +353,10 @@ pub fn is_noise(name: &str) -> bool {
 
 /// Should this service get an HTTP health probe (vs TCP-only)?
 pub fn is_http_category(cat: Category) -> bool {
-    matches!(cat, Category::Frontend | Category::Backend | Category::Runtime)
+    matches!(
+        cat,
+        Category::Frontend | Category::Backend | Category::Runtime
+    )
 }
 
 #[cfg(test)]
@@ -353,10 +368,26 @@ mod tests {
         let cases = [
             ("node", "node /x/node_modules/.bin/vite --port 5173", "vite"),
             ("node", "next-server (v14.2.3)", "nextjs"),
-            ("node", "node /p/node_modules/@nestjs/cli/bin/nest.js start --watch", "nestjs"),
-            ("python3.12", "/usr/bin/python uvicorn main:app --reload", "fastapi"),
-            ("python", "python manage.py runserver 0.0.0.0:8000", "django"),
-            ("postgres", "/opt/homebrew/bin/postgres -D /opt/homebrew/var/postgresql@16", "postgres"),
+            (
+                "node",
+                "node /p/node_modules/@nestjs/cli/bin/nest.js start --watch",
+                "nestjs",
+            ),
+            (
+                "python3.12",
+                "/usr/bin/python uvicorn main:app --reload",
+                "fastapi",
+            ),
+            (
+                "python",
+                "python manage.py runserver 0.0.0.0:8000",
+                "django",
+            ),
+            (
+                "postgres",
+                "/opt/homebrew/bin/postgres -D /opt/homebrew/var/postgresql@16",
+                "postgres",
+            ),
             ("redis-server", "redis-server *:6379", "redis"),
             ("com.docker.backend", "/Applications/Docker.app/…", "docker"),
             ("node", "node server.js", "node"),
@@ -381,7 +412,10 @@ mod tests {
 
     #[test]
     fn docker_images() {
-        assert_eq!(from_docker_image("postgres:16-alpine").unwrap().key, "postgres");
+        assert_eq!(
+            from_docker_image("postgres:16-alpine").unwrap().key,
+            "postgres"
+        );
         assert_eq!(from_docker_image("redis:7-alpine").unwrap().key, "redis");
         assert!(from_docker_image("ghcr.io/foo/custom-api:latest").is_none());
     }

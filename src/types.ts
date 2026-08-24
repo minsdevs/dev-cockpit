@@ -2,12 +2,15 @@
 
 export type ServiceKind = "process" | "container" | "startable";
 export type HealthLevel = "ok" | "warn" | "down" | "unknown";
+export type AttributionLevel = "high" | "medium" | "low";
 
 export interface Health {
   tcp: boolean | null;
   httpStatus: number | null;
   level: HealthLevel | null;
   detail: string | null;
+  consecutiveFailures?: number;
+  checkMethod?: string | null;
 }
 
 export interface Service {
@@ -32,6 +35,10 @@ export interface Service {
   projectPath: string | null;
   startCommand: string | null;
   isHttp: boolean;
+  attribution: AttributionLevel | null;
+  attributionReason: string | null;
+  parentPid: number | null;
+  parentCommand: string | null;
 }
 
 export interface PortBinding {
@@ -137,11 +144,163 @@ export interface NotifyConfig {
   cooldownSec: number;
 }
 
+export interface HealthCheckConfig {
+  method: string; // "auto" | "tcp" | "http" | "none"
+  path: string;
+  httpMethod: string;
+  expectedStatus: number[];
+  intervalMs: number;
+}
+
 export interface ProjectOverride {
   name: string | null;
   commands: Record<string, string>;
   healthUrl: string | null;
+  healthChecks?: Record<string, HealthCheckConfig>;
+  presets?: Preset[];
+  defaultLaunchTarget?: string | null;
+  launchPaths?: Record<string, string>;
 }
+
+// ---------------------------------------------------------------------------
+// Presets
+// ---------------------------------------------------------------------------
+
+export type ReadinessCondition = "tcpPort" | "healthCheck" | "immediate";
+
+export interface PresetService {
+  serviceId: string;
+  dependsOn: string[];
+  readiness: ReadinessCondition;
+}
+
+export interface Preset {
+  id: string;
+  name: string;
+  services: PresetService[];
+}
+
+export type PresetStepStatus = "pending" | "starting" | "ready" | "failed" | "skipped" | "stopping" | "stopped";
+
+export interface PresetStepProgress {
+  serviceId: string;
+  status: PresetStepStatus;
+  error: string | null;
+}
+
+export interface PresetProgress {
+  presetId: string;
+  projectPath: string;
+  running: boolean;
+  phase: string;
+  steps: PresetStepProgress[];
+  error: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// External Tools
+// ---------------------------------------------------------------------------
+
+export interface ToolLaunchResult {
+  success: boolean;
+  value: string | null;
+  detail: string;
+}
+
+// ---------------------------------------------------------------------------
+// Updater
+// ---------------------------------------------------------------------------
+
+export interface UpdateInfo {
+  version: string;
+  channel: string;
+  releaseNotes: string;
+  downloadUrl: string;
+  sha256: string;
+  publishedAt: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Preflight, recovery, launch, timeline, and backup
+// ---------------------------------------------------------------------------
+
+export interface PreflightCheck {
+  level: string;
+  code: string;
+  serviceId: string | null;
+  message: string;
+  remedy: string | null;
+}
+export interface PreflightStep {
+  serviceId: string;
+  command: string;
+  cwd: string;
+  expectedPorts: number[];
+  readiness: ReadinessCondition;
+}
+export interface PreflightPlan {
+  presetId: string;
+  projectPath: string;
+  groups: PreflightStep[][];
+  rollbackOrder: string[];
+  checks: PreflightCheck[];
+  canStart: boolean;
+  dryRun: boolean;
+}
+export interface RecoveryRecord {
+  managedId: string;
+  pid: number;
+  name: string;
+  projectPath: string | null;
+  presetId: string | null;
+  status: "recovered" | "ended" | "uncertain" | string;
+  detail: string;
+  readOnly: boolean;
+}
+export interface LaunchTarget {
+  id: string;
+  label: string;
+  kind: "web" | "androidStudio" | "xcode" | string;
+  serviceId: string | null;
+  url: string | null;
+  path: string | null;
+  ready: boolean;
+  installed: boolean;
+  isDefault: boolean;
+  detail: string;
+}
+export interface LaunchResult { opened: boolean; targetId: string | null; detail: string; }
+export interface TimelineEvent {
+  id: number;
+  atMs: number;
+  projectPath: string;
+  service: string | null;
+  kind: string;
+  level: string;
+  message: string;
+}
+export interface DiagnosticBundle {
+  projectPath: string;
+  generatedAtMs: number;
+  events: TimelineEvent[];
+  markdown: string;
+  json: string;
+  masked: boolean;
+}
+export interface ImportChange {
+  id: string;
+  kind: string;
+  status: string;
+  detail: string;
+  selectable: boolean;
+}
+export interface ImportPreview {
+  schemaVersion: number;
+  changes: ImportChange[];
+  warnings: string[];
+  canApply: boolean;
+}
+export interface ExportResult { json: string; warnings: string[]; }
 
 export interface AppConfig {
   roots: string[];
@@ -160,6 +319,8 @@ export interface AppConfig {
   hiddenProjects: string[];
   projectOverrides: Record<string, ProjectOverride>;
   pinned: boolean;
+  updateChannel: string;
+  checkUpdates: boolean;
 }
 
 export interface LogLine {

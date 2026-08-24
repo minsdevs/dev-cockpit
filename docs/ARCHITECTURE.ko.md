@@ -1,138 +1,149 @@
 # 아키텍처
 
-Dev Cockpit의 구성: 모듈, 데이터 흐름, IPC 표면, 그리고 그 뒤의 설계 결정들.
+현재 RC 모듈, 데이터 흐름, 저장과 release 안전성입니다.
 
 *English version: [ARCHITECTURE.md](ARCHITECTURE.md)*
 
 ## 개요
 
-```
-┌─────────────────────────────  macOS  ─────────────────────────────┐
-│  lsof        sysinfo       docker CLI      git CLI     filesystem │
-└────┬────────────┬──────────────┬──────────────┬────────────┬─────┘
-     │            │              │              │            │
-┌────▼────────────▼──────────────▼──────────────▼────────────▼─────┐
-│                     scan/  (collectors, pure functions)          │
-│   ports.rs      procs.rs      docker.rs      git.rs   projects.rs│
-│        └───────────┬─ detect.rs (classification) ─┬──────┘       │
-│                    └──────── link.rs ─────────────┘              │
-│                       (assemble Snapshot)                        │
-├──────────────────────────────────────────────────────────────────┤
-│ monitor.rs   scheduler · health merge · diff · tray · notifier   │
-│ control.rs   start/stop/restart · compose · open                 │
-│ logs.rs      ring-buffer log sessions · event streaming          │
-│ notify.rs    snapshot diff → Notification Center (cooldowns)     │
-│ state.rs     shared AppState (config, snapshot, managed procs)   │
-│ commands.rs  #[tauri::command] surface (thin wrappers)           │
-│ lib.rs       tray · panel window · global shortcut · plugins     │
-└───────────────┬──────────────────────────────────────────────────┘
-                │  Tauri IPC: invoke (commands) + emit (events)
-┌───────────────▼──────────────────────────────────────────────────┐
-│  React UI (src/)                                                 │
-│  ipc.ts → hooks.ts → App.tsx → ProjectCard / ServiceRow /        │
-│  ContainerRow / LogsView / SettingsView                          │
-└──────────────────────────────────────────────────────────────────┘
+```text
+macOS/CLI/filesystem
+  lsof · sysinfo · docker · git · manifests
+                │
+                ▼
+scan/* → link.rs → Snapshot → monitor.rs
+                │          ├─ notify.rs
+                │          └─ timeline.rs
+                ▼
+state.rs ← control/logs/preset/preflight/session/launch/backup/updater/tools
+                │
+                ▼ Tauri invoke/events
+React: ipc.ts → hooks.ts → App.tsx → components/*
 ```
 
-스택: **Tauri v2**(Rust 백엔드, WKWebView 셸) + **React 19 / TypeScript strict** + 순수 CSS. React 외 웹 프레임워크 없음, CSS 프레임워크 없음, ORM 없음 — 가장 무거운 의존성이 `sysinfo`입니다.
+Tauri v2, Rust 2021, React 19, strict TypeScript와 CSS를 사용합니다. 루트 npm workspace는 private이며 npm 설치는 별도 `installer/` package가 제공합니다.
 
-## 백엔드 모듈 (`src-tauri/src/`)
+## Backend map (`src-tauri/src`)
 
 | 모듈 | 책임 |
 | --- | --- |
-| `models.rs` | 모든 공유 타입(`Snapshot`, `Service`, `Container`, `ProjectView`, `AppConfig`, …). serde `camelCase`로 UI에 직렬화. 데이터 계약의 단일 진실 공급원. |
-| `config.rs` | `~/Library/Application Support/<id>/` 아래 `AppConfig` JSON 로드/저장, 기본 프로젝트 루트, 값 범위 제한. |
-| `scan/ports.rs` | `lsof` field 모드 1회 실행 → 바인드 주소를 포함한 리스너 목록; 충돌 감지를 위한 주소 겹침 로직(와일드카드 vs 루프백 vs 특정 주소, IPv4/IPv6). |
-| `scan/procs.rs` | 리스너 PID와 부모 체인의 `sysinfo` 메트릭(CPU, RSS, cwd, 커맨드라인, 시작 시각); 프로젝트 연결용 조상 관계 헬퍼. |
-| `scan/detect.rs` | 분류 휴리스틱: 커맨드라인 + cwd + 이미지명 → 프레임워크 키, 런타임, 표시 이름, HTTP 여부. 시스템 데몬 노이즈 필터. |
-| `scan/projects.rs` | 루트 폴더 BFS 디스커버리(깊이 제한, 스킵 목록), 매니페스트 파싱, 모노레포 워크스페이스 확장, 패키지 매니저 + 시작 스크립트 결정. 디스커버리 틱 사이에는 캐시. |
-| `scan/docker.rs` | 데몬 프로브, `docker ps`(커스텀 구분자 포맷), `docker stats`, compose 라벨 추출, 컨테이너 액션. |
-| `scan/git.rs` | `git status --porcelain=v2 --branch` + `git log -1` 파싱 → 브랜치, dirty, ahead/behind, 마지막 커밋. |
-| `scan/health.rs` | 의존성 없는 TCP connect와 최소 HTTP/1.1 `GET /` 프로브. 엄격한 타임아웃, 블로킹 스레드에서 실행. |
-| `scan/link.rs` | 조인: 리스너 × 프로세스 × 프로젝트 × 컨테이너 × git → `Snapshot`. cwd/조상 관계 기반 프로젝트 연결, compose 링크, 충돌 그룹핑, 합계. |
-| `monitor.rs` | 심장 박동. 소스별 주기의 틱 루프, 슬립/웨이크 재동기화, 병렬 헬스 프로브, 트레이 타이틀/툴팁 갱신, 알림 공급, 변경 시에만 스냅샷 emit. |
-| `control.rs` | Start(로그인 셸 spawn, 독립 프로세스 그룹, 로그 세션), Stop(SIGTERM/SIGKILL, 그룹 인지, 개발 서비스 한정 가드), Restart, compose 액션, 터미널/에디터/Finder/URL 열기(http(s)만). |
-| `logs.rs` | 로그 세션: 자식 stdout/stderr 또는 `docker logs -f --tail 300`을 제한된 링 버퍼(2,000줄 × 4,000자)로 펌핑, `logs://<id>` 이벤트로 배치 emit. |
-| `notify.rs` | 스냅샷 differ → 알림 결정: 중지된 서비스/컨테이너, 헬스 실패(2회 연속) / 복구, 새 충돌, docker 데몬 전이. 키별 쿨다운, 시작 + 재동기화 grace, 사용자 중지 억제. 릴리즈는 네이티브 알림, 개발은 `osascript`. |
-| `state.rs` | `AppState`: config, 최신 스냅샷, 관리 자식 프로세스 레지스트리, 로그 레지스트리, 억제 목록, 스케줄러 wake 핸들. |
-| `commands.rs` | 약 20개의 `#[tauri::command]` 래퍼 — 자체 로직 없음. |
-| `lib.rs` | 앱 배선: 트레이 아이콘 + 메뉴, 트레이 아래 패널 배치(모니터 클램프), 블러 시 숨김 vs 핀, `⌃⌥D` 전역 단축키, 자동 시작, 단일 인스턴스, 플러그인 등록. |
+| `models.rs` | Snapshot/config/service/container 계약과 serde camelCase 경계. |
+| `config.rs` | `config.json` atomic 저장과 기본 root. |
+| `scan/ports.rs`, `procs.rs` | listener와 대상 process/ancestry metric. |
+| `scan/detect.rs`, `projects.rs` | framework 분류와 보수적 project/start-command 발견. |
+| `scan/docker.rs`, `git.rs`, `health.rs` | Docker, Git, TCP/HTTP health 수집. |
+| `scan/link.rs` | 귀속 신뢰도, project/container/service join, conflict, total. |
+| `monitor.rs` | 주기 수집, health, diff emit, tray, sleep/wake resync, timeline 관찰. |
+| `control.rs` | 보호된 service/Compose/container/open과 managed process group. |
+| `logs.rs` | 상한이 있는 live log session과 event batch. |
+| `preset.rs` | preset 검증, topological group, readiness, rollback, ownership, progress. |
+| `preflight.rs` | 읽기 전용 plan과 executable/cwd/port/Docker/Compose/health 검사. |
+| `session.rs` | atomic process identity 원장과 보수적 복구. |
+| `launch.rs` | 검증된 loopback/Android Studio/Xcode 실행 대상. |
+| `timeline.rs` | 상한 structured timeline, disk rotation, local masking, diagnostics. |
+| `backup.rs` | version config export, preview 검증, 선택 import, 이전 backup. |
+| `updater.rs` | update fetch/version logic과 현재 fail-closed signature gate. |
+| `tools.rs` | 확인·escape 후 dev-finder와 local Code Intelligence로 전달. |
+| `notify.rs`, `state.rs`, `commands.rs`, `lib.rs` | 알림, 공유 상태, IPC wrapper, app/tray/plugin wiring. |
 
-## 스케줄링
+## Scheduling과 snapshot flow
 
-tokio 태스크 하나가 전부를 구동합니다(`monitor.rs`). 소스마다 자체 주기가 있고 시간이 되었을 때만 실행됩니다:
+기본 주기는 port/process/health 3초, Docker `ps` 5초, Docker stats 15초, Git 20초, discovery 10분입니다.
 
-| 소스 | 기본 주기 |
-| --- | --- |
-| 포트 + 프로세스 (+ 헬스) | 3초 |
-| Docker `ps` | 5초 |
-| Docker `stats` | 15초 |
-| Git | 20초 |
-| 프로젝트 디스커버리 | 10분 |
+1. 시간이 된 collector가 격리된 데이터를 만들며 실패는 다른 source를 중단하지 않고 기록합니다.
+2. `link.rs`가 불변 project-centric `Snapshot`과 귀속 신뢰도를 만듭니다.
+3. Health를 merge하고 `notify.rs`가 cooldown/grace와 transition을 평가합니다.
+4. `timeline.rs`가 structured transition을 관찰합니다.
+5. 바뀐 snapshot만 React로 emit합니다.
+6. Command는 공유 상태를 통해 즉시 scan을 요청할 수 있습니다.
 
-- 루프는 약 800ms 단위로 잠들고, `Notify` 핸들로 커맨드(Scan Now, 설정 변경, 서비스 시작)가 즉시 깨울 수 있습니다.
-- **슬립/웨이크**: 루프가 예산보다 훨씬 길게 잤다고 감지하면 다음 사이클은 *재동기화* — 데이터는 갱신하되 사라짐 알림은 억제하므로, 노트북을 덮었다 열어도 "service stopped" 알림이 쏟아지지 않습니다.
-- **일시정지**(트레이 또는 상태바)는 루프를 완전히 세웁니다.
+Sleep/wake oversleep은 disappearance 알림을 억제한 resync cycle을 만듭니다. Pause는 scan을 세웁니다.
 
-## 데이터 흐름
+## 제어와 preset 안전성
 
-1. 수집기들이 실행되고(틱마다 시간이 된 것만) 순수 데이터를 만듭니다.
-2. `link.rs`가 불변 `Snapshot { projects, orphanServices, otherListeners, unlinkedContainers, conflicts, totals, errors, seq }`을 조립합니다.
-3. 헬스 결과가 병합되고 전이가 추적됩니다.
-4. `notify.rs`가 이전 스냅샷과 diff하여 쿨다운을 거쳐 알림을 발송합니다.
-5. 스냅샷을 마지막으로 emit한 것과 비교해 — **다를 때만** UI로 `snapshot`을 emit하고 트레이 타이틀을 갱신합니다.
-6. React는 `useSnapshot()` 훅 하나로 받고, UI 전체는 (스냅샷, 설정, 뷰 상태)의 순수 함수입니다.
+Managed command는 독립 process group에서 실행합니다. spawn 뒤 session ledger 기록이 실패하면 ownership 없는 group을 남기지 않고 종료합니다.
 
-수집기 실패는 절대 전파되지 않습니다: 외부 명령마다 타임아웃이 있고, 에러는 `snapshot.errors`로 모여 상태바 경고로 표시되며, 나머지 데이터는 계속 살아 있습니다.
+Preset은 두 단계입니다.
+
+1. `preflight::build_plan`이 process/container/file을 바꾸지 않고 현재 snapshot/config를 검증합니다.
+2. `preset::run_preset`이 preflight를 반복하고 `can_start`일 때만 progress를 만든 뒤 dependency group, readiness와 실패 rollback을 수행합니다.
+
+Ownership은 project path, preset ID, service name과 writable managed identity를 사용합니다. 같은 이름의 외부 process를 rollback 소유 대상으로 보지 않습니다.
+
+## 세션 복구 모델
+
+`session-ledger.json` schema 1은 managed ID, PID, PGID, process start time, command/hash, cwd, project, preset과 기록 시각을 포함합니다.
+
+앱 시작 시 live OS identity와 비교합니다. 정확히 일치하면 reconnect, 종료됐으면 ended, 불일치면 uncertain/read-only입니다. Recovered group은 자연 종료만 관찰하고 자동 restart하지 않습니다. 과거 pipe는 재생성할 수 없습니다.
+
+실제 격리 process group과 start-time mismatch로 검증했지만 설치 production app relaunch와 실제 reboot는 미검증입니다.
+
+## 실행 대상 모델
+
+후보 생성은 결정적이고 allowlist 기반입니다.
+
+- Web: 현재 process service, HTTP 분류, 정상 health, loopback URL.
+- Android: Gradle settings와 Android manifest, Android Studio로 열기.
+- iOS: `.xcworkspace`, 없으면 `.xcodeproj`, Xcode로 열기.
+
+저장된 ID/path는 사용 전 현재 후보로 검증합니다. Backend open-after-ready polling은 상한이 있고 한 번만 엽니다.
+
+## 타임라인과 진단
+
+Structured event는 5,000개 memory deque를 사용합니다. Disk write는 bounded `try_send` channel을 사용해 process 처리가 storage를 기다리지 않게 합니다. `timeline.ndjson`은 5 MiB 뒤 절반 수준으로 rotation합니다.
+
+진단은 structured event와 상한이 있는 현재 log session을 합치고 일반 비밀 형태를 마스킹한 뒤 timestamp 정렬·output 상한을 적용해 Markdown/JSON으로 만듭니다. UI는 clipboard 복사 전 preview를 요구합니다.
+
+## Backup/import 경계
+
+`backup.rs`는 `AppConfig` schema v1만 export합니다. Secret-like command assignment와 query-bearing legacy health URL을 제거합니다. Runtime PID/log/session data는 backup schema field 자체가 없습니다.
+
+Import는 JSON parse, unsupported/unknown structure 거부, 현재 config/snapshot 비교, project/service/preset reference 검증 후 선택 가능한 change를 반환합니다. Apply는 현재 config를 복사한 뒤 선택 설정을 atomic save합니다.
+
+## 저장
+
+```text
+~/Library/Application Support/com.min0504.devcockpit/
+├── config.json
+├── session-ledger.json
+├── timeline.ndjson
+└── config.pre-import-<timestamp>.json
+```
+
+Live log buffer는 메모리에 있고 structured timeline event는 rotation과 함께 저장됩니다. 구 npm installer는 현재 backend config와 다른 legacy `~/.config/dev-cockpit` 경로를 별도로 알고 있습니다.
 
 ## IPC 표면
 
-커맨드 (`src/ipc.ts`에서 invoke):
+기존 snapshot/config/service/Docker/log/app command 외 RC command:
 
-| 그룹 | 커맨드 |
-| --- | --- |
-| 데이터 | `get_snapshot`, `force_scan`, `rescan_projects` |
-| 설정 | `get_config`, `set_config` |
-| 서비스 | `start_service`, `stop_service`, `restart_service` |
-| Docker | `docker_action`, `compose_action` |
-| 열기 | `open_path` (터미널/에디터/finder), `open_url` (http/https만) |
-| 로그 | `open_log_session`, `get_log_lines`, `close_log_session` |
-| 앱 | `get_autostart`, `set_autostart`, `set_paused`, `is_paused`, `hide_panel`, `quit_app` |
+- Preset: `save_preset`, `delete_preset`, `preflight_preset`, `run_preset`, `stop_preset`, `get_preset_progress`.
+- Recovery: `get_recovery_records`.
+- Launch: `list_launch_targets`, `save_launch_target`, `open_launch_target`, `open_launch_when_ready`.
+- Timeline: `get_project_timeline`, `create_diagnostic_bundle`.
+- Backup: `export_settings_backup`, `preview_settings_import`, `apply_settings_import`.
+- Tool/update: dev-finder, Code Intelligence, `check_for_update`.
 
-이벤트 (백엔드 → UI): `snapshot`, `toast`, `paused`, `managed-exited`, `logs://<session>`, `logs-ended://<session>`.
+Event는 snapshot/toast/pause/log/managed-exit와 preset progress channel을 포함합니다.
 
-## 프론트엔드 (`src/`)
+## Package와 release 구조
 
-| 파일 | 역할 |
-| --- | --- |
-| `types.ts` | `models.rs`의 TypeScript 미러(camelCase 계약). |
-| `ipc.ts` | 타입이 붙은 `invoke`/`listen` 래퍼 — Tauri API를 만지는 유일한 파일. |
-| `hooks.ts` | `useSnapshot`, `useConfig`, `useToasts`, `usePaused`, 시계 + 테마 훅. |
-| `utils.ts` | 포매팅(바이트/CPU/업타임/상대 시간), 검색 매칭, 프레임워크 색상 + 모노그램. 단위 테스트 있음. |
-| `App.tsx` | 셸: 검색, 충돌 배너, 섹션 구성, 시트 라우팅(로그/설정), 키보드 처리, 토스트. |
-| `components/` | `ProjectCard`, `ServiceRow`, `ContainerRow`, `LogsView`, `SettingsView`. |
-| `styles.css` | 디자인 토큰(테마별 CSS 변수) + 모든 컴포넌트 스타일. CSS 프레임워크 없음. |
+- 루트 `package.json`: private React/Tauri build workspace, 1.0.1.
+- `installer/package.json`: publish 가능한 `@min0504/dev-cockpit` 1.0.1, `install.js`를 npx binary로 노출.
+- 게시된 npm installer: 고정 unsigned v1.0.1 ZIP + SHA-256 + quarantine 제거, `--dir`/`--no-open`만 지원, rollback copy 없이 교체.
+- 현재 RC installer source: legacy settings backup, previous-app rollback, channel parsing을 추가했지만 공개 1.0.1 tarball과 다르고 여전히 v1.0.1을 가리킴.
+- Release workflow: build → sign/notarize → ZIP/hash → manifest → 게시 전 gate → GitHub Release.
 
-UI 원칙: 장식보다 정보 밀도, hover로 드러나는 액션, 기능적 전환 외 애니메이션 없음, 메트릭에 tabular numerals, 시스템 폰트 스택, vibrancy가 적용된 네이티브 느낌의 팝오버.
+현재 workflow는 placeholder manifest signature를 만들고 앱에도 placeholder public key가 있으므로 게시 전 gate가 release 생성 전에 실패합니다. Runtime verifier도 실제 Ed25519가 구현되지 않아 key 형식만 그럴듯해도 fail-closed입니다.
 
-## 안전 모델
+## 보안 경계
 
-설계상 로컬 전용 — 그래도 무엇을 건드릴 수 있는지 신중하게 정합니다:
+- 저신뢰 stop 승인과 정확한 preset ownership.
+- 자동 web/health는 loopback-only, 일반 URL open은 http(s)-only.
+- Android Studio/Xcode allowlist, 외부 tool path escape와 승인.
+- Version backup schema는 알 수 없는 runtime field를 거부.
+- Diagnostic은 local, bounded, masked, preview-first.
+- SHA-256은 artifact 무결성만 제공합니다. 정식 publisher identity는 Developer ID 서명과 공증이 필요합니다.
 
-- **Stop 가드**: 현재 스냅샷이 개발 서비스로 분류한 PID에만 시그널 가능; 시스템 프로세스는 거부.
-- **프로세스 그룹**: 관리 자식은 독립 그룹에서 실행; stop은 그룹에 시그널하므로 고아 watcher가 남지 않음.
-- **명령 실행**: Start는 감지된 패키지 매니저 스크립트 / compose, 또는 사용자가 명시한 override만 실행 — 스캔에서 나온 임의 문자열은 절대 실행하지 않음.
-- **URL 가드**: `open_url`은 `http(s)`만 허용.
-- **네트워크 송신 없음**: 프로브는 오직 `localhost` 대상; 어디에도 데이터를 보내지 않음. 로그는 메모리에만 유지.
+## 검증 경계
 
-## 테스트
-
-- **Rust (25개)**: `lsof` field 모드 파싱 + 충돌 겹침, `docker ps` 파싱 + 메모리/포트 파싱, git porcelain 파싱, 임시 디렉터리 기반 디스커버리/워크스페이스/패키지 매니저 결정, 링크/연결/충돌/숨긴 프로젝트 조립, 실제 로컬 리스너 대상 헬스 프로브.
-- **TypeScript (vitest)**: 포매팅과 검색 매칭 유틸리티.
-- 파서는 의도적으로 문자열에 대한 순수 함수로 작성되어, 실제 CLI 없이도 픽스처로 엣지 케이스를 커버합니다.
-
-## 빌드
-
-- `npm run tauri dev` — vite 개발 서버 + 핫 리로드가 되는 디버그 Rust 빌드.
-- `npm run tauri build` — 릴리즈 번들(`Dev Cockpit.app`, 약 7 MB).
-- 아이콘은 `scripts/render-icons.swift`로 생성합니다(앱 스쿼클 + 메뉴바 템플릿 이미지).
+자동 RC 검증은 compile, lint/test, frontend type/build, process-group scenario, identity recovery, loopback launch, preflight zero-start, masking, backup 검증을 다룹니다. production GUI, 설치 앱 relaunch, reboot, 실제 서명/공증, 실제 Ed25519, fresh-machine 설치는 release blocker입니다. 메모리 추세는 보류합니다.

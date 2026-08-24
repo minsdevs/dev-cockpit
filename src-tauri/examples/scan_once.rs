@@ -50,7 +50,10 @@ fn main() {
     });
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&snapshot).expect("serialize"));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&snapshot).expect("serialize")
+        );
         return;
     }
 
@@ -71,13 +74,23 @@ fn main() {
         let git = p
             .git
             .as_ref()
-            .map(|g| format!(" [{}{}]", g.branch, if g.dirty_count > 0 { "*" } else { "" }))
+            .map(|g| {
+                format!(
+                    " [{}{}]",
+                    g.branch,
+                    if g.dirty_count > 0 { "*" } else { "" }
+                )
+            })
             .unwrap_or_default();
         println!("\n▸ {}{}  ({})", p.name, git, p.path);
         for s in &p.services {
             println!(
                 "    {} {}  ports={:?} pid={:?} fw={:?}",
-                if s.kind == dev_cockpit_lib::models::ServiceKind::Startable { "▷" } else { "●" },
+                if s.kind == dev_cockpit_lib::models::ServiceKind::Startable {
+                    "▷"
+                } else {
+                    "●"
+                },
                 s.name,
                 s.ports,
                 s.pid,

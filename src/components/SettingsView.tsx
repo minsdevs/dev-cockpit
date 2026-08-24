@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ipc } from "../ipc";
-import type { AppConfig } from "../types";
+import type { AppConfig, RecoveryRecord } from "../types";
+import { BackupPanel } from "./BackupPanel";
 import { basename, tildify } from "../utils";
 import { IconX } from "../icons";
 
@@ -14,9 +15,11 @@ interface Props {
 export function SettingsView({ config, save, onClose, push }: Props) {
   const [autostart, setAutostart] = useState(false);
   const [newRoot, setNewRoot] = useState("");
+  const [recovery, setRecovery] = useState<RecoveryRecord[]>([]);
 
   useEffect(() => {
     ipc.getAutostart().then(setAutostart).catch(() => {});
+    ipc.getRecoveryRecords().then(setRecovery).catch(() => {});
   }, []);
 
   const update = (patch: Partial<AppConfig>) => {
@@ -288,6 +291,26 @@ export function SettingsView({ config, save, onClose, push }: Props) {
             ))}
           </div>
         )}
+
+        {recovery.length > 0 && (
+          <div className="set-group">
+            <h3>Previous session recovery</h3>
+            <p className="hint">No recovered process is automatically started or stopped. Uncertain entries are read-only.</p>
+            {recovery.map((record) => (
+              <div className={`recovery-record ${record.status}`} key={record.managedId}>
+                <strong>{record.name} · pid {record.pid}</strong>
+                <span>{record.status}{record.presetId ? ` · preset ${record.presetId}` : ""}{record.readOnly ? " · read-only" : ""}</span>
+                <small>{record.detail}</small>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="set-group">
+          <h3>Settings & preset backup</h3>
+          <p className="hint">PID, logs, session ledger and secret-like environment values are excluded. Import always starts with a dry-run.</p>
+          <BackupPanel onApplied={(next) => { void save(next); }} push={push} />
+        </div>
 
         <div className="set-group">
           <h3>App</h3>

@@ -41,7 +41,9 @@ pub fn parse(raw: &str) -> Vec<Listener> {
     let mut cmd = String::new();
 
     for line in raw.lines() {
-        let Some(tag) = line.chars().next() else { continue };
+        let Some(tag) = line.chars().next() else {
+            continue;
+        };
         let val = &line[1..];
         match tag {
             'p' => {
@@ -53,7 +55,9 @@ pub fn parse(raw: &str) -> Vec<Listener> {
                 if pid <= 0 {
                     continue;
                 }
-                let Some(port) = parse_port(val) else { continue };
+                let Some(port) = parse_port(val) else {
+                    continue;
+                };
                 let key = (pid, port, val.to_string());
                 if !seen.insert(key) {
                     continue;

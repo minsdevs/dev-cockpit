@@ -17,9 +17,30 @@ const MAX_DIRS: usize = 6000;
 const MAX_WORKSPACE_DIRS: usize = 40;
 
 const SKIP_DIRS: &[&str] = &[
-    "node_modules", "vendor", "dist", "build", "out", "target", ".next", ".nuxt", ".output",
-    ".venv", "venv", "__pycache__", ".cache", "coverage", "Pods", "DerivedData", ".terraform",
-    ".turbo", ".expo", ".yarn", ".pnpm-store", "Library", "Applications", ".Trash",
+    "node_modules",
+    "vendor",
+    "dist",
+    "build",
+    "out",
+    "target",
+    ".next",
+    ".nuxt",
+    ".output",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".cache",
+    "coverage",
+    "Pods",
+    "DerivedData",
+    ".terraform",
+    ".turbo",
+    ".expo",
+    ".yarn",
+    ".pnpm-store",
+    "Library",
+    "Applications",
+    ".Trash",
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -74,7 +95,9 @@ pub fn discover(roots: &[String]) -> DiscoveryResult {
             continue;
         };
         if !canon_root.is_dir() {
-            result.errors.push(format!("root is not a directory: {root}"));
+            result
+                .errors
+                .push(format!("root is not a directory: {root}"));
             continue;
         }
 
@@ -84,7 +107,9 @@ pub fn discover(roots: &[String]) -> DiscoveryResult {
         while let Some((dir, depth)) = queue.pop_front() {
             visited += 1;
             if visited > MAX_DIRS {
-                result.errors.push("project scan truncated (too many directories)".into());
+                result
+                    .errors
+                    .push("project scan truncated (too many directories)".into());
                 break;
             }
             if is_project_dir(&dir) {
@@ -97,7 +122,9 @@ pub fn discover(roots: &[String]) -> DiscoveryResult {
             if depth >= MAX_DEPTH {
                 continue;
             }
-            let Ok(entries) = fs::read_dir(&dir) else { continue };
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
             for entry in entries.flatten() {
                 let Ok(ft) = entry.file_type() else { continue };
                 if !ft.is_dir() || ft.is_symlink() {
@@ -128,8 +155,17 @@ pub fn shellexpand_home(p: &str) -> String {
 
 fn is_project_dir(dir: &Path) -> bool {
     const MARKERS: &[&str] = &[
-        ".git", "package.json", "pyproject.toml", "docker-compose.yml", "docker-compose.yaml",
-        "compose.yml", "compose.yaml", "go.mod", "Cargo.toml", "Gemfile", "mix.exs",
+        ".git",
+        "package.json",
+        "pyproject.toml",
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        "compose.yml",
+        "compose.yaml",
+        "go.mod",
+        "Cargo.toml",
+        "Gemfile",
+        "mix.exs",
     ];
     MARKERS.iter().any(|m| dir.join(m).exists())
 }
@@ -170,7 +206,12 @@ pub fn analyze(dir: &Path) -> ProjectStatic {
         p.package_name = pkg.get("name").and_then(|v| v.as_str()).map(String::from);
         for dep in node_deps(pkg) {
             if let Some(det) = detect::from_node_dep(&dep) {
-                add_fw(det.key, det.label, detect::node_dep_priority(det.key), &mut fw);
+                add_fw(
+                    det.key,
+                    det.label,
+                    detect::node_dep_priority(det.key),
+                    &mut fw,
+                );
             }
         }
         if let Some((script, cmd)) = pick_script(pkg, &pm) {
@@ -197,7 +238,9 @@ pub fn analyze(dir: &Path) -> ProjectStatic {
     // --- workspaces / sub-packages ---
     let ws_dirs = workspace_dirs(dir, root_pkg.as_ref());
     for sub in ws_dirs {
-        let Some(pkg) = read_json(&sub.join("package.json")) else { continue };
+        let Some(pkg) = read_json(&sub.join("package.json")) else {
+            continue;
+        };
         let sub_path = sub.to_string_lossy().to_string();
         if sub_path == path {
             continue;
@@ -207,7 +250,9 @@ pub fn analyze(dir: &Path) -> ProjectStatic {
             .and_then(|v| v.as_str())
             .map(short_pkg_name)
             .unwrap_or_else(|| {
-                sub.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+                sub.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
             });
         let det = script_framework(&pkg);
         for dep in node_deps(&pkg) {
@@ -256,7 +301,12 @@ pub fn analyze(dir: &Path) -> ProjectStatic {
     }
 
     // --- compose ---
-    for cf in ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"] {
+    for cf in [
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        "compose.yml",
+        "compose.yaml",
+    ] {
         let f = dir.join(cf);
         if f.exists() {
             p.compose_file = Some(cf.to_string());
@@ -275,9 +325,17 @@ pub fn analyze(dir: &Path) -> ProjectStatic {
     // --- other ecosystems ---
     if dir.join("go.mod").exists() {
         add_fw("go", "Go", 2, &mut fw);
+        // Discover Go cmd/* targets
+        for spec in go_cmd_targets(dir) {
+            p.startables.push(spec);
+        }
     }
     if dir.join("Cargo.toml").exists() && !dir.join("package.json").exists() {
         add_fw("rust", "Rust", 2, &mut fw);
+        // Discover Cargo executable targets
+        for spec in cargo_executables(dir) {
+            p.startables.push(spec);
+        }
     }
     if dir.join("Gemfile").exists() {
         add_fw("ruby", "Ruby", 2, &mut fw);
@@ -287,6 +345,36 @@ pub fn analyze(dir: &Path) -> ProjectStatic {
     }
     if !py_deps.is_empty() && fw.is_empty() {
         add_fw("python", "Python", 5, &mut fw);
+    }
+
+    // --- pyproject.toml scripts (uv/poetry) ---
+    for spec in pyproject_scripts(dir) {
+        if !p
+            .startables
+            .iter()
+            .any(|s| s.name == spec.name && s.dir == spec.dir)
+        {
+            p.startables.push(spec);
+        }
+    }
+
+    // --- Makefile targets (allowlisted: dev, run, start) ---
+    for spec in makefile_targets(dir) {
+        if !p
+            .startables
+            .iter()
+            .any(|s| s.name == spec.name && s.dir == spec.dir)
+        {
+            p.startables.push(spec);
+        }
+    }
+
+    // --- Gradle bootRun (Spring Boot) ---
+    if let Some(spec) = gradle_bootrun(dir) {
+        if !p.startables.iter().any(|s| s.command == spec.command) {
+            add_fw("spring", "Spring Boot", 1, &mut fw);
+            p.startables.push(spec);
+        }
     }
 
     let mut pairs: Vec<(String, String, u8)> =
@@ -390,7 +478,8 @@ fn workspace_dirs(root: &Path, pkg: Option<&serde_json::Value>) -> Vec<PathBuf> 
         }
     }
     if let Ok(text) = fs::read_to_string(root.join("pnpm-workspace.yaml")) {
-        if let Ok(serde_yaml::Value::Mapping(m)) = serde_yaml::from_str::<serde_yaml::Value>(&text) {
+        if let Ok(serde_yaml::Value::Mapping(m)) = serde_yaml::from_str::<serde_yaml::Value>(&text)
+        {
             if let Some(serde_yaml::Value::Sequence(seq)) =
                 m.get(serde_yaml::Value::String("packages".into()))
             {
@@ -443,7 +532,9 @@ fn workspace_dirs(root: &Path, pkg: Option<&serde_json::Value>) -> Vec<PathBuf> 
 
 /// Compose service names + images (used to link containers and label DBs).
 fn compose_services(file: &Path) -> (Vec<String>, Vec<String>) {
-    let Ok(text) = fs::read_to_string(file) else { return (Vec::new(), Vec::new()) };
+    let Ok(text) = fs::read_to_string(file) else {
+        return (Vec::new(), Vec::new());
+    };
     let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(&text) else {
         return (Vec::new(), Vec::new());
     };
@@ -505,6 +596,254 @@ fn dep_name(spec: impl AsRef<str>) -> String {
         .map(|i| s[..i].to_string())
         .unwrap_or_else(|| s.to_string())
         .to_lowercase()
+}
+
+// ---------------------------------------------------------------------------
+// Extended command discovery (P1)
+// ---------------------------------------------------------------------------
+
+/// Extract runnable scripts from pyproject.toml [project.scripts] or
+/// [tool.poetry.scripts]. Commands use uv/poetry if their lockfiles exist.
+fn pyproject_scripts(dir: &Path) -> Vec<StartableSpec> {
+    let mut out = Vec::new();
+    let Ok(text) = fs::read_to_string(dir.join("pyproject.toml")) else {
+        return out;
+    };
+    let Ok(doc) = text.parse::<toml::Table>() else {
+        return out;
+    };
+
+    let has_uv = dir.join("uv.lock").exists();
+    let has_poetry = dir.join("poetry.lock").exists();
+
+    let path_str = dir.to_string_lossy().to_string();
+
+    // PEP 621: [project.scripts]
+    if let Some(scripts) = doc
+        .get("project")
+        .and_then(|p| p.get("scripts"))
+        .and_then(|s| s.as_table())
+    {
+        for (name, _entry_point) in scripts {
+            let command = if has_uv {
+                format!("uv run {name}")
+            } else if has_poetry {
+                format!("poetry run {name}")
+            } else {
+                name.clone()
+            };
+            out.push(StartableSpec {
+                name: name.clone(),
+                dir: path_str.clone(),
+                command,
+                framework_key: Some("python".into()),
+                framework_label: Some("Python".into()),
+                is_http: true, // conservative: might be a server
+            });
+        }
+    }
+
+    // Poetry: [tool.poetry.scripts]
+    if let Some(scripts) = doc
+        .get("tool")
+        .and_then(|t| t.get("poetry"))
+        .and_then(|p| p.get("scripts"))
+        .and_then(|s| s.as_table())
+    {
+        for (name, _entry_point) in scripts {
+            // Skip if already added from [project.scripts]
+            if out.iter().any(|s| s.name == *name) {
+                continue;
+            }
+            let command = if has_poetry {
+                format!("poetry run {name}")
+            } else if has_uv {
+                format!("uv run {name}")
+            } else {
+                name.clone()
+            };
+            out.push(StartableSpec {
+                name: name.clone(),
+                dir: path_str.clone(),
+                command,
+                framework_key: Some("python".into()),
+                framework_label: Some("Python".into()),
+                is_http: true,
+            });
+        }
+    }
+
+    out
+}
+
+/// Extract allowlisted Makefile targets: dev, run, start only.
+/// Conservative: only well-known dev server targets.
+fn makefile_targets(dir: &Path) -> Vec<StartableSpec> {
+    let mut out = Vec::new();
+    let makefile = dir.join("Makefile");
+    let Ok(text) = fs::read_to_string(&makefile) else {
+        return out;
+    };
+
+    const ALLOWED: &[&str] = &["dev", "run", "start"];
+    let path_str = dir.to_string_lossy().to_string();
+
+    for line in text.lines() {
+        // Target lines: "target:" or "target: deps"
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') || trimmed.starts_with('\t') || trimmed.starts_with(' ') {
+            continue;
+        }
+        if let Some(colon_pos) = trimmed.find(':') {
+            // Ignore lines with '=' before ':' (variable assignments)
+            if trimmed[..colon_pos].contains('=') {
+                continue;
+            }
+            let target = trimmed[..colon_pos].trim();
+            // Only single-word targets in our allowlist
+            if ALLOWED.contains(&target) && !target.contains(' ') {
+                out.push(StartableSpec {
+                    name: format!("make {target}"),
+                    dir: path_str.clone(),
+                    command: format!("make {target}"),
+                    framework_key: None,
+                    framework_label: None,
+                    is_http: true, // assume dev server
+                });
+            }
+        }
+    }
+
+    out
+}
+
+/// Detect Spring Boot projects with Gradle and suggest bootRun.
+fn gradle_bootrun(dir: &Path) -> Option<StartableSpec> {
+    let gradle_files = ["build.gradle", "build.gradle.kts"];
+    let mut found_spring = false;
+
+    for gf in &gradle_files {
+        let path = dir.join(gf);
+        if let Ok(content) = fs::read_to_string(&path) {
+            let cl = content.to_lowercase();
+            if cl.contains("spring-boot") || cl.contains("org.springframework.boot") {
+                found_spring = true;
+                break;
+            }
+        }
+    }
+
+    if !found_spring {
+        return None;
+    }
+
+    // Prefer gradlew wrapper if available
+    let cmd = if dir.join("gradlew").exists() {
+        "./gradlew bootRun".to_string()
+    } else {
+        "gradle bootRun".to_string()
+    };
+
+    Some(StartableSpec {
+        name: format!("{} (Spring Boot)", dir.file_name()?.to_string_lossy()),
+        dir: dir.to_string_lossy().to_string(),
+        command: cmd,
+        framework_key: Some("spring".into()),
+        framework_label: Some("Spring Boot".into()),
+        is_http: true,
+    })
+}
+
+/// Detect Cargo executable binary targets.
+fn cargo_executables(dir: &Path) -> Vec<StartableSpec> {
+    let mut out = Vec::new();
+    let cargo_path = dir.join("Cargo.toml");
+    let Ok(text) = fs::read_to_string(&cargo_path) else {
+        return out;
+    };
+    let Ok(doc) = text.parse::<toml::Table>() else {
+        return out;
+    };
+
+    let path_str = dir.to_string_lossy().to_string();
+
+    // Check for [[bin]] sections
+    if let Some(bins) = doc.get("bin").and_then(|b| b.as_array()) {
+        for bin in bins {
+            if let Some(name) = bin.get("name").and_then(|n| n.as_str()) {
+                out.push(StartableSpec {
+                    name: name.to_string(),
+                    dir: path_str.clone(),
+                    command: format!("cargo run --bin {name}"),
+                    framework_key: Some("rust".into()),
+                    framework_label: Some("Rust".into()),
+                    is_http: false,
+                });
+            }
+        }
+    }
+
+    // If no [[bin]] but has [package] (default binary), suggest cargo run
+    if out.is_empty() {
+        if let Some(pkg) = doc.get("package").and_then(|p| p.as_table()) {
+            let name = pkg.get("name").and_then(|n| n.as_str()).unwrap_or("app");
+            // Only suggest if src/main.rs exists (it's an executable, not just a lib)
+            if dir.join("src/main.rs").exists() {
+                out.push(StartableSpec {
+                    name: name.to_string(),
+                    dir: path_str,
+                    command: "cargo run".to_string(),
+                    framework_key: Some("rust".into()),
+                    framework_label: Some("Rust".into()),
+                    is_http: false,
+                });
+            }
+        }
+    }
+
+    out
+}
+
+/// Detect Go cmd/* directories (each subdir with .go files is a main package).
+fn go_cmd_targets(dir: &Path) -> Vec<StartableSpec> {
+    let mut out = Vec::new();
+    let cmd_dir = dir.join("cmd");
+    let Ok(entries) = fs::read_dir(&cmd_dir) else {
+        return out;
+    };
+
+    let path_str = dir.to_string_lossy().to_string();
+
+    for entry in entries.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        if !ft.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy().to_string();
+
+        // Verify there's at least one .go file in the directory
+        let has_go = fs::read_dir(entry.path())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .any(|e| e.file_name().to_string_lossy().ends_with(".go"))
+            })
+            .unwrap_or(false);
+
+        if has_go {
+            out.push(StartableSpec {
+                name: name_str.clone(),
+                dir: path_str.clone(),
+                command: format!("go run ./cmd/{name_str}"),
+                framework_key: Some("go".into()),
+                framework_label: Some("Go".into()),
+                is_http: false, // conservative
+            });
+        }
+    }
+
+    out
 }
 
 #[cfg(test)]
@@ -578,7 +917,10 @@ mod tests {
     #[test]
     fn conventional_dirs_without_workspaces() {
         let dir = tmp_project(&[
-            ("package.json", r#"{"name":"root","scripts":{"dev":"concurrently"}}"#),
+            (
+                "package.json",
+                r#"{"name":"root","scripts":{"dev":"concurrently"}}"#,
+            ),
             (
                 "frontend/package.json",
                 r#"{"name":"frontend","scripts":{"dev":"vite"},"devDependencies":{"vite":"1"}}"#,
@@ -604,7 +946,10 @@ mod tests {
             ("group/proj-a/package.json", r#"{"name":"a"}"#),
             ("group/proj-a/nested/package.json", r#"{"name":"nested"}"#),
             ("group/plain/README.md", "no project"),
-            ("proj-b/pyproject.toml", "[project]\nname='b'\ndependencies=[]"),
+            (
+                "proj-b/pyproject.toml",
+                "[project]\nname='b'\ndependencies=[]",
+            ),
         ]);
         let res = discover(&[base.to_string_lossy().to_string()]);
         let names: Vec<_> = res.projects.iter().map(|p| p.name.as_str()).collect();
@@ -620,5 +965,128 @@ mod tests {
         assert_eq!(dep_name("fastapi>=0.110"), "fastapi");
         assert_eq!(dep_name("uvicorn[standard]"), "uvicorn");
         assert_eq!(dep_name("Django==5.0"), "django");
+    }
+
+    #[test]
+    fn discovers_pyproject_scripts() {
+        let dir = tmp_project(&[
+            ("pyproject.toml", "[project]\nname = \"myapp\"\n\n[project.scripts]\nserve = \"myapp.main:run\"\nworker = \"myapp.worker:start\"\n"),
+            ("uv.lock", "# uv lockfile"),
+        ]);
+        let specs = pyproject_scripts(&dir);
+        assert_eq!(specs.len(), 2);
+        assert!(specs
+            .iter()
+            .any(|s| s.name == "serve" && s.command == "uv run serve"));
+        assert!(specs
+            .iter()
+            .any(|s| s.name == "worker" && s.command == "uv run worker"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discovers_poetry_scripts() {
+        let dir = tmp_project(&[
+            ("pyproject.toml", "[tool.poetry]\nname = \"myapp\"\n\n[tool.poetry.scripts]\ndev-server = \"myapp:main\"\n"),
+            ("poetry.lock", "# poetry lockfile"),
+        ]);
+        let specs = pyproject_scripts(&dir);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].name, "dev-server");
+        assert_eq!(specs[0].command, "poetry run dev-server");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discovers_makefile_targets() {
+        let dir = tmp_project(&[
+            ("Makefile", "build:\n\tgo build\n\ndev:\n\tgo run .\n\nrun:\n\t./app\n\ntest:\n\tgo test\n\nstart: build\n\t./app\n"),
+        ]);
+        let specs = makefile_targets(&dir);
+        let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"make dev"));
+        assert!(names.contains(&"make run"));
+        assert!(names.contains(&"make start"));
+        // 'build' and 'test' are NOT in the allowlist
+        assert!(!names.contains(&"make build"));
+        assert!(!names.contains(&"make test"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discovers_gradle_bootrun() {
+        let dir = tmp_project(&[
+            (
+                "build.gradle.kts",
+                "plugins {\n    id(\"org.springframework.boot\") version \"3.2.0\"\n}\n",
+            ),
+            ("gradlew", "#!/bin/sh\nexec gradle \"$@\"\n"),
+        ]);
+        let spec = gradle_bootrun(&dir);
+        assert!(spec.is_some());
+        let spec = spec.unwrap();
+        assert_eq!(spec.command, "./gradlew bootRun");
+        assert_eq!(spec.framework_key.as_deref(), Some("spring"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gradle_without_spring_is_skipped() {
+        let dir = tmp_project(&[("build.gradle", "plugins {\n    id 'java'\n}\n")]);
+        assert!(gradle_bootrun(&dir).is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discovers_cargo_executables() {
+        let dir = tmp_project(&[
+            ("Cargo.toml", "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"server\"\npath = \"src/server.rs\"\n\n[[bin]]\nname = \"cli\"\npath = \"src/cli.rs\"\n"),
+        ]);
+        let specs = cargo_executables(&dir);
+        assert_eq!(specs.len(), 2);
+        assert!(specs
+            .iter()
+            .any(|s| s.name == "server" && s.command == "cargo run --bin server"));
+        assert!(specs
+            .iter()
+            .any(|s| s.name == "cli" && s.command == "cargo run --bin cli"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discovers_cargo_default_binary() {
+        let dir = tmp_project(&[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"simple-app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            ("src/main.rs", "fn main() {}\n"),
+        ]);
+        let specs = cargo_executables(&dir);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].name, "simple-app");
+        assert_eq!(specs[0].command, "cargo run");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discovers_go_cmd_targets() {
+        let dir = tmp_project(&[
+            ("go.mod", "module example.com/myapp\n\ngo 1.21\n"),
+            ("cmd/server/main.go", "package main\nfunc main() {}\n"),
+            ("cmd/worker/main.go", "package main\nfunc main() {}\n"),
+            ("cmd/empty/.gitkeep", ""),
+        ]);
+        let specs = go_cmd_targets(&dir);
+        assert_eq!(specs.len(), 2);
+        assert!(specs
+            .iter()
+            .any(|s| s.name == "server" && s.command == "go run ./cmd/server"));
+        assert!(specs
+            .iter()
+            .any(|s| s.name == "worker" && s.command == "go run ./cmd/worker"));
+        // 'empty' dir has no .go files, should not appear
+        assert!(!specs.iter().any(|s| s.name == "empty"));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

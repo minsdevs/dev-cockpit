@@ -1,18 +1,40 @@
 # Usage Guide
 
-Everything you need to install, run and operate Dev Cockpit day to day.
+How to install and operate the current Dev Cockpit release candidate.
 
 *한국어판: [USAGE.ko.md](USAGE.ko.md)*
 
-## Installation
+## 1. Choose a distribution path
 
-### Via npm (Apple Silicon)
+### Existing unsigned npm installer (1.0.1)
 
 ```bash
-npx @min0504/dev-cockpit
+npx @min0504/dev-cockpit@1.0.1
 ```
 
-Downloads the latest release, verifies its SHA-256 checksum, installs `Dev Cockpit.app` into `/Applications` (or `~/Applications` if not writable) and launches it. Options: `--dir <path>` to choose the install directory, `--no-open` to skip launching.
+This runs the separately published installer package, not the private root source package. It supports macOS Apple Silicon and Node.js 18+.
+
+What 1.0.1 actually does:
+
+1. Downloads `Dev-Cockpit-1.0.1-macos-aarch64.zip` from GitHub Releases.
+2. Compares the bytes with the SHA-256 embedded in `install.js`.
+3. Installs to `/Applications`, falling back to `~/Applications`, or uses `--dir`.
+4. Deletes an existing `Dev Cockpit.app` before extraction. The published installer has no automatic rollback copy.
+5. Extracts with `ditto`, removes `com.apple.quarantine`, and opens the app unless `--no-open` is supplied.
+
+```bash
+npx @min0504/dev-cockpit@1.0.1 --help
+npx @min0504/dev-cockpit@1.0.1 --dir "$HOME/Applications" --no-open
+```
+
+Important limitations:
+
+- The artifact is unsigned and not notarized. SHA-256 verifies integrity against the installer’s pinned value, not publisher identity.
+- Quarantine removal is an explicit Gatekeeper bypass used by this existing developer installer.
+- The published npm 1.0.1 has no `--channel`, `--no-preserve`, settings-backup, or previous-app rollback option.
+- The checked-in RC `installer/install.js` adds those options and `Dev Cockpit.previous.app`, but it has not been republished as a new npm version; its channel option still uses the pinned v1.0.1 URL. Its backup path is legacy `~/.config/dev-cockpit`, while current app data is under `~/Library/Application Support/com.min0504.devcockpit/` and is not removed by replacing the `.app`.
+
+Use this only as an unsigned developer distribution. See [SIGNING.md](SIGNING.md).
 
 ### Build from source
 
@@ -23,136 +45,138 @@ npm install
 npm run tauri build
 ```
 
-The bundle is produced at:
+Output:
 
-```
+```text
 src-tauri/target/release/bundle/macos/Dev Cockpit.app
 ```
 
-Move it to `/Applications` and launch it.
+This does not by itself produce a Developer ID signed or notarized artifact.
 
-### First launch
+## 2. Open and navigate
 
-- **Gatekeeper** — the app is not code-signed. If macOS blocks it, right-click the app → Open → Open.
-- **Notifications** — the release build asks for notification permission once. Allow it if you want alerts for crashed servers, health failures and port conflicts.
-- **Launch at Login** — enable it from the tray menu or Settings so the cockpit is always available.
+After launch, use the menu-bar gauge icon or `⌃⌥D`.
 
-After launch, a gauge icon appears in the menu bar. When services are running, the icon shows a count (running services + containers). Hover for a tooltip with the full breakdown.
-
-## The Panel
-
-Click the tray icon (or press `⌃⌥D` anywhere) to open the panel. It anchors under the tray icon and hides when it loses focus — unless pinned.
-
-From top to bottom:
-
-1. **Search field** — filters everything live.
-2. **Conflict banner** — appears only when two processes listen on overlapping addresses of the same port. Names each process, PID and project; each entry has a stop button.
-3. **Project cards** — one per discovered project that has something running (or that you expand). Header: project name, Git branch, dirty count, ahead/behind arrows, last commit. Rows inside: running services, containers, then startable-but-idle services.
-4. **Other dev processes** — dev-looking processes that could not be attributed to any project.
-5. **Docker** — containers not linked to any project, plus daemon status.
-6. **Idle projects** — collapsed group of discovered projects with nothing running.
-7. **Status bar** — last scan time and duration, totals, pause and rescan buttons.
-
-### Keyboard
-
-| Key | Action |
+| Key/action | Result |
 | --- | --- |
-| `⌃⌥D` (global) | Toggle the panel from anywhere |
+| `⌃⌥D` | Toggle the panel globally |
 | `/` or `⌘F` | Focus search |
-| `Esc` | Close sheet → clear search → hide panel (in that order) |
+| `Esc` | Close the current sheet, clear search, then hide the panel |
+| Pin | Keep the panel visible on focus loss |
+| Tray → Pause Monitoring | Stop periodic scans |
+| Tray → Rescan Now | Force scan and project rediscovery |
 
-## Services
+The panel groups active projects, idle projects, unattributed development processes, unlinked containers, and optional non-development listeners. Port conflicts appear separately.
 
-Each service row shows: status dot, framework badge, name, port badge, CPU, memory, uptime. Hover a row for actions.
+## 3. Services and attribution safety
 
-- **Status dot** — green: running/healthy · yellow: degraded (TCP open but HTTP failing, container health `starting`) · red: down/unhealthy · hollow: not running.
-- **Port badge** — click to open `http://localhost:<port>` when the service speaks HTTP; the tooltip lists all ports.
-- **Stop** — sends SIGTERM. `⌥`-click to SIGKILL. When the process leads its own process group (e.g. `npm run dev` trees), the whole group is stopped so no orphans linger. Stopping is only allowed on detected dev services — system processes are protected.
-- **Start** — appears on idle services with a detected start command. The command is resolved from the project's package manager (`pnpm` / `yarn` / `bun` / `npm`, by lockfile) and its scripts, preferring `dev` → `start:dev` → `serve` → `start`. Compose projects start with `docker compose up -d`. Starting opens a live log view.
-- **Edit start command** — hover an idle service to override what Start runs for that service. Overrides are saved per project.
-- **Restart** — stop + start, available when the start command is known (managed services always know theirs).
-- **Logs** — services started from Dev Cockpit stream their stdout/stderr live.
+Service rows show framework/runtime, PID, port, CPU, memory, uptime, health, and attribution details.
 
-## Projects
+- **Start:** uses a discovered start command or an explicit project override in the service cwd.
+- **Stop:** sends SIGTERM; `⌥`-click requests SIGKILL. Managed process groups are stopped together.
+- **Restart:** stop then start when the command is known.
+- **Low-confidence ownership:** the UI asks for confirmation showing PID, full command, cwd, and parent information. System or unrelated processes are not silently treated as safe.
+- **Health:** TCP is the safe default. HTTP checks are used only for recognized HTTP services or explicit per-service configuration. Custom method/path/status/interval settings are available through project config; remote health URLs are rejected.
 
-Project cards group everything that belongs to one repository or app directory.
+## 4. Presets, preflight, and dry-run
 
-- **Header actions** (on hover): compose up/down, open in browser, open in terminal, open in editor, reveal in Finder, hide project.
-- **Git info** — branch, uncommitted-change count, ahead/behind vs upstream, last commit summary and age. Refreshed every 20 s (configurable).
-- **Discovery** — projects are found by scanning your configured root folders for Git repositories and project manifests (`package.json`, `pyproject.toml`, `docker-compose.yml` / `compose.yaml`, `go.mod`, `Cargo.toml`, `Gemfile`, `mix.exs`, …). Monorepo workspaces (`pnpm-workspace.yaml`, `package.json` `workspaces`) are analyzed so each sub-package gets its own startable service.
-- **Attribution** — a running process is linked to a project by its working directory (including parent processes), so `pnpm dev` started in any subfolder still lands on the right card.
+Open a project menu and choose **Presets…**.
 
-## Docker
+- A preset contains discovered services, dependency edges, and readiness conditions.
+- **Plan** runs a read-only dry-run. It displays sequential/parallel groups, command, cwd, expected ports, readiness, and rollback order.
+- Preflight checks the first executable, cwd, known port conflicts, Docker availability, Compose files, and health settings.
+- A blocking result shows **blocked — zero-start** and does not create progress or start a process/container.
+- **Start** repeats preflight immediately before execution. Services start by dependency group; readiness failure cancels later groups and rolls back owned services.
+- **Stop** uses reverse dependency order and exact preset ownership.
+- **Open representative app once after health is ready** polls for up to 60 seconds, opens once, and does not retry forever.
 
-Containers linked to a project (via compose working directory or labels) appear inside the project card; the rest are listed in the Docker section.
+Dry-run is read-only, but state may change afterward; this is why Start repeats the critical checks.
 
-- Rows show container/compose-service name, image, host ports, CPU, memory and uptime.
-- Actions: logs (live `docker logs -f` tail), restart, stop / start.
-- Compose projects get a single **compose up / compose down** button on the project card; output streams into a log view.
-- If the Docker daemon is not running, Docker features simply deactivate — a subtle note is shown and everything else keeps working.
+## 5. Previous-session recovery
 
-## Logs View
+Dev Cockpit writes a managed-process ledger to:
 
-Opened from a service or container's log button, or automatically when you start something.
-
-- **Live stream** with a bounded buffer (last 2,000 lines are kept; long lines truncated at 4,000 chars).
-- **Filter** box narrows visible lines; the match count is shown.
-- **Pause** freezes the view while buffering incoming lines; resume flushes them.
-- **Clear** empties the view.
-- **Follow** — the view sticks to the bottom; scroll up to detach, click Follow to re-attach.
-- Leaving the view closes the log session (container tails are terminated; nothing keeps running in the background).
-
-## Notifications
-
-Sent for: service stopped unexpectedly · container stopped · health check failed (two consecutive failures) · recovered · new port conflict · Docker daemon lost/back.
-
-- Per-event cooldown (default 60 s, configurable 10 s–1 h) prevents repeats.
-- The first scans after app start and after sleep/wake are grace periods — no false "stopped" alerts.
-- Stopping something yourself never notifies.
-- Every event type can be toggled individually in Settings.
-
-## Settings
-
-Open with the gear button in the panel header.
-
-| Setting | Meaning | Default |
-| --- | --- | --- |
-| Theme | System / Light / Dark | System |
-| Launch at Login | macOS login item | off |
-| Keep window open | Disable hide-on-blur (pin) | off |
-| Scan interval | Ports + processes | 3 s (2/3/5/10) |
-| Docker interval | `docker ps` cadence | 5 s |
-| HTTP health checks | Probe local HTTP ports | on |
-| Show idle projects | List projects with nothing running | on |
-| Show other listeners | Non-dev processes with open ports | off |
-| Notifications | Master + per-event toggles + cooldown | on, 60 s |
-| Project roots | Folders scanned for projects | `~/Dev`, `~/Developer`, `~/Projects`, `~/Code`, `~/repos`, `~/workspace` (existing ones) |
-| Projects | Rename, hide/unhide, per-project overrides | — |
-
-### Config file
-
-All settings live in a single JSON file you can edit or back up:
-
-```
-~/Library/Application Support/com.min0504.devcockpit/config.json
+```text
+~/Library/Application Support/com.min0504.devcockpit/session-ledger.json
 ```
 
-The app watches its own writes only; if you edit the file by hand, restart the app.
+On launch, it requires matching PID, PGID, OS process start time, command hash, cwd, and project relationship before reconnecting.
 
-## Tray Menu
+- **Recovered:** identity matches and the process can be represented as managed.
+- **Ended:** the old process no longer exists.
+- **Uncertain:** an identity mismatch or unreadable identity; controls are disabled and the record is read-only.
+- No record is automatically restarted. Recovered processes are not automatically stopped merely because the new app instance exits.
+- Historical stdout/stderr pipes cannot be reconstructed; the recovered log session explains this limitation.
 
-Right-click (or click) the tray icon:
+View records in **Settings → Previous session recovery**. App relaunch behavior has automated/process-level coverage, but installed production-app relaunch and real reboot remain unverified RC gates.
 
-- **Open Dev Cockpit** (`⌃⌥D`)
-- **Rescan Now** — immediate full scan + project re-discovery
-- **Pause Monitoring** — stops all scanning (checkbox)
-- **Launch at Login** (checkbox)
-- **Quit**
+## 6. Representative app launch
 
-## Uninstall
+Press **App** on a project card.
 
-1. Quit Dev Cockpit (tray menu → Quit).
-2. Delete `Dev Cockpit.app`.
-3. Optionally remove the config: `~/Library/Application Support/com.min0504.devcockpit/`.
+Selection order:
 
-No other files are written anywhere on the system.
+1. Saved project default, revalidated against current candidates.
+2. Exactly one healthy HTTP service on `127.0.0.1`.
+3. Exactly one Android Studio or Xcode candidate.
+4. Otherwise, a picker asks you to choose and optionally save a default.
+
+Supported targets:
+
+- **Web:** validated loopback URL and optional local path such as `/docs` or `/admin`.
+- **Android:** project root only when Gradle settings and `app/src/main/AndroidManifest.xml` are present; opens allowlisted Android Studio.
+- **iOS:** Xcode; `.xcworkspace` is preferred over `.xcodeproj`.
+
+No arbitrary app name or shell command is accepted. Missing IDEs produce installation guidance. Production GUI click-through is still an RC verification gap even though backend/API and loopback launch smoke tests pass.
+
+## 7. Timeline and diagnostics
+
+Choose **Project menu → Timeline & diagnostics…**.
+
+- Combines managed/Docker log lines with service start/stop, health, preset, and port-conflict events.
+- Filters by service, event kind, and 15-minute/1-hour/6-hour/24-hour ranges.
+- **Preview diagnostic** builds Markdown or JSON locally.
+- Common token, password, secret, Authorization/Bearer, and cookie shapes are masked before preview.
+- Nothing is copied until you click **Copy**; no diagnostic is uploaded.
+
+Limits: 5,000 in-memory structured events, non-blocking disk queue, a 5 MiB `timeline.ndjson` rotated to roughly half-size, bounded log sessions and line lengths. Masking is defensive, not a guarantee that every possible secret format is recognized; review the preview.
+
+## 8. Settings and preset backup/import
+
+Open **Settings → Settings & preset backup**.
+
+- **Export & copy JSON:** schema-versioned global config and project overrides, including presets, health checks, and launch defaults.
+- Excludes PID, log content, session ledger, and detected secret-like command values. Query-bearing legacy health URLs are excluded with warnings.
+- **Dry-run import:** rejects unsupported future/zero schemas and unknown nested fields; classifies global/project changes as added, changed, unchanged, missing, or conflict.
+- Missing projects and invalid service/preset references are not selectable.
+- **Apply selected:** applies only selected valid items and first copies the current config to `config.pre-import-<timestamp>.json`.
+
+The installer’s legacy settings backup is not this in-app backup feature.
+
+## 9. Logs, Docker, Git, and notifications
+
+- Live logs use a per-session ring buffer (2,000 lines, 4,000 characters per line); filter, pause/catch-up, clear, copy, and follow are available.
+- Docker rows expose state, health, ports, CPU/memory, logs, start/stop/restart, and Compose up/down when the daemon is available.
+- Git shows branch, dirty count, ahead/behind, and last commit.
+- Notifications cover unexpected service/container exit, health failure/recovery, conflicts, and Docker transitions, with cooldown and sleep/wake grace.
+
+## 10. Configuration and uninstall
+
+App data directory:
+
+```text
+~/Library/Application Support/com.min0504.devcockpit/
+```
+
+Possible files include `config.json`, `session-ledger.json`, `timeline.ndjson`, and pre-import backups.
+
+To uninstall:
+
+1. Quit Dev Cockpit.
+2. Delete `Dev Cockpit.app` and, if present, `Dev Cockpit.previous.app`.
+3. Optionally delete the Application Support directory above.
+4. If the old installer created them, optionally remove `~/.config/dev-cockpit.backup/` and an empty legacy `~/.config/dev-cockpit/`.
+
+## 11. Validation boundary
+
+Automated and command/API tests cover the main RC logic, including preflight zero-start, process ownership, recovery identity, launch selection, masking, and backup schema checks. The following remain unverified: full production-app GUI click-through, installed-app relaunch recovery, real reboot, Developer ID signing/notarization/stapling, real Ed25519 success/failure chain, and fresh-machine install/rollback.

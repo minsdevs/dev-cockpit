@@ -19,6 +19,8 @@ const FLUSH_INTERVAL: Duration = Duration::from_millis(120);
 
 struct Session {
     info: LogSessionInfo,
+    project_path: Option<String>,
+    service_name: Option<String>,
     buf: VecDeque<LogLine>,
     seq: u64,
     ended: bool,
@@ -41,7 +43,9 @@ impl Default for LogRegistry {
 
 impl LogRegistry {
     pub fn new() -> Self {
-        Self { inner: Arc::new(Mutex::new(HashMap::new())) }
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Background flusher — emits pending batches even when a stream goes
@@ -67,7 +71,15 @@ impl LogRegistry {
             .expect("spawn log flusher");
     }
 
-    fn create(&self, id: &str, title: &str, source: &str, reader_pid: Option<i32>) {
+    fn create(
+        &self,
+        id: &str,
+        title: &str,
+        source: &str,
+        reader_pid: Option<i32>,
+        project_path: Option<String>,
+        service_name: Option<String>,
+    ) {
         let mut sessions = self.inner.lock().expect("logs lock");
         sessions.insert(
             id.to_string(),
@@ -77,6 +89,8 @@ impl LogRegistry {
                     title: title.to_string(),
                     source: source.to_string(),
                 },
+                project_path,
+                service_name,
                 buf: VecDeque::with_capacity(256),
                 seq: 0,
                 ended: false,
@@ -91,7 +105,8 @@ impl LogRegistry {
                 .iter()
                 .filter(|(_, s)| s.ended)
                 .map(|(k, _)| k.clone())
-                .next();
+                .next()
+                .or_else(|| sessions.keys().find(|key| key.as_str() != id).cloned());
             if let Some(k) = victim {
                 sessions.remove(&k);
             }
@@ -100,7 +115,9 @@ impl LogRegistry {
 
     pub fn push(&self, app: &AppHandle, id: &str, raw: &str, stderr: bool) {
         let mut sessions = self.inner.lock().expect("logs lock");
-        let Some(s) = sessions.get_mut(id) else { return };
+        let Some(s) = sessions.get_mut(id) else {
+            return;
+        };
         s.seq += 1;
         let line = LogLine {
             seq: s.seq,
@@ -133,6 +150,44 @@ impl LogRegistry {
         }
     }
 
+    pub fn timeline_events(
+        &self,
+        project_path: &str,
+        limit: usize,
+    ) -> Vec<crate::timeline::TimelineEvent> {
+        let sessions = self.inner.lock().expect("logs lock");
+        let mut events: Vec<_> = sessions
+            .values()
+            .filter(|session| session.project_path.as_deref() == Some(project_path))
+            .flat_map(|session| {
+                session
+                    .buf
+                    .iter()
+                    .map(move |line| crate::timeline::TimelineEvent {
+                        id: line
+                            .at_ms
+                            .saturating_mul(1000)
+                            .saturating_add(line.seq % 1000),
+                        at_ms: line.at_ms,
+                        project_path: project_path.to_string(),
+                        service: session.service_name.clone(),
+                        kind: "log".into(),
+                        level: if line.stderr {
+                            "error".into()
+                        } else {
+                            "info".into()
+                        },
+                        message: crate::timeline::mask_secrets(&line.line),
+                    })
+            })
+            .collect();
+        events.sort_by_key(|event| (event.at_ms, event.id));
+        if events.len() > limit {
+            events.drain(..events.len() - limit);
+        }
+        events
+    }
+
     pub fn lines(&self, id: &str) -> Option<(LogSessionInfo, Vec<LogLine>, bool)> {
         let sessions = self.inner.lock().expect("logs lock");
         sessions
@@ -152,7 +207,9 @@ impl LogRegistry {
     /// sessions stay alive (the service keeps running and logging).
     pub fn close(&self, id: &str) {
         let mut sessions = self.inner.lock().expect("logs lock");
-        let Some(s) = sessions.get_mut(id) else { return };
+        let Some(s) = sessions.get_mut(id) else {
+            return;
+        };
         if let Some(pid) = s.reader_pid {
             unsafe {
                 libc::kill(pid, libc::SIGTERM);
@@ -164,7 +221,14 @@ impl LogRegistry {
 
     /// Create a session backed by `docker logs -f`. Reuses a live session for
     /// the same container.
-    pub fn open_docker(&self, app: &AppHandle, container_id: &str, title: &str) -> Result<String, String> {
+    pub fn open_docker(
+        &self,
+        app: &AppHandle,
+        container_id: &str,
+        title: &str,
+        project_path: Option<String>,
+        service_name: Option<String>,
+    ) -> Result<String, String> {
         let source = format!("docker:{container_id}");
         if let Some(existing) = self.find_by_source(&source) {
             return Ok(existing);
@@ -176,8 +240,19 @@ impl LogRegistry {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("docker logs: {e}"))?;
-        let id = format!("d-{}-{}", &container_id[..container_id.len().min(12)], now_ms() % 100_000);
-        self.create(&id, title, &source, Some(child.id() as i32));
+        let id = format!(
+            "d-{}-{}",
+            &container_id[..container_id.len().min(12)],
+            now_ms() % 100_000
+        );
+        self.create(
+            &id,
+            title,
+            &source,
+            Some(child.id() as i32),
+            project_path,
+            service_name,
+        );
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -205,13 +280,50 @@ impl LogRegistry {
         app: &AppHandle,
         managed_id: &str,
         title: &str,
-        stdout: Option<std::process::ChildStdout>,
-        stderr: Option<std::process::ChildStderr>,
+        project_path: Option<String>,
+        service_name: Option<String>,
+        pipes: (
+            Option<std::process::ChildStdout>,
+            Option<std::process::ChildStderr>,
+        ),
     ) -> String {
         let id = format!("m-{managed_id}");
-        self.create(&id, title, &format!("managed:{managed_id}"), None);
-        self.spawn_reader(app.clone(), id.clone(), stdout, false);
-        self.spawn_reader(app.clone(), id.clone(), stderr, true);
+        self.create(
+            &id,
+            title,
+            &format!("managed:{managed_id}"),
+            None,
+            project_path,
+            service_name,
+        );
+        self.spawn_reader(app.clone(), id.clone(), pipes.0, false);
+        self.spawn_reader(app.clone(), id.clone(), pipes.1, true);
+        id
+    }
+
+    pub fn open_recovered(
+        &self,
+        app: &AppHandle,
+        managed_id: &str,
+        title: &str,
+        project_path: Option<String>,
+        service_name: Option<String>,
+    ) -> String {
+        let id = format!("recovered-{managed_id}");
+        self.create(
+            &id,
+            title,
+            &format!("managed:{managed_id}"),
+            None,
+            project_path,
+            service_name,
+        );
+        self.push(
+            app,
+            &id,
+            "── recovered process: prior stdout/stderr pipes are unavailable; control identity was revalidated ──",
+            false,
+        );
         id
     }
 
@@ -291,12 +403,12 @@ mod tests {
 
     #[test]
     fn strips_ansi() {
-        assert_eq!(sanitize_line("\u{1b}[32mready\u{1b}[0m in 300ms"), "ready in 300ms");
+        assert_eq!(
+            sanitize_line("\u{1b}[32mready\u{1b}[0m in 300ms"),
+            "ready in 300ms"
+        );
         assert_eq!(sanitize_line("plain"), "plain");
         assert_eq!(sanitize_line("a\rb"), "ab");
-        assert_eq!(
-            sanitize_line("\u{1b}]0;title\u{7}text"),
-            "text"
-        );
+        assert_eq!(sanitize_line("\u{1b}]0;title\u{7}text"), "text");
     }
 }

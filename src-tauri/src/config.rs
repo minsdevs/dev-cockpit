@@ -54,10 +54,6 @@ pub fn default_roots() -> Vec<String> {
     ["Dev", "Developer", "Projects", "Code", "repos", "workspace"]
         .iter()
         .map(|d| format!("{home}/{d}"))
-        .filter(|p| {
-            fs::metadata(p)
-                .map(|m| m.is_dir())
-                .unwrap_or(false)
-        })
+        .filter(|p| fs::metadata(p).map(|m| m.is_dir()).unwrap_or(false))
         .collect()
 }

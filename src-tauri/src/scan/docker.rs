@@ -121,7 +121,11 @@ pub fn parse_ps(raw: &str) -> Vec<Container> {
 
 fn none_if_empty(s: &str) -> Option<String> {
     let t = s.trim();
-    if t.is_empty() { None } else { Some(t.to_string()) }
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
 }
 
 /// "Up 2 hours (healthy)" -> healthy; "(health: starting)" -> starting
@@ -161,8 +165,15 @@ pub fn parse_ports(raw: &str) -> Vec<PortBinding> {
             continue;
         }
         // Dedup v4/v6 duplicates of the same mapping.
-        if !out.iter().any(|b: &PortBinding| b.host == host && b.container == container) {
-            out.push(PortBinding { host, container, proto });
+        if !out
+            .iter()
+            .any(|b: &PortBinding| b.host == host && b.container == container)
+        {
+            out.push(PortBinding {
+                host,
+                container,
+                proto,
+            });
         }
     }
     out.sort_by_key(|b| (b.host.unwrap_or(u16::MAX), b.container));
@@ -209,7 +220,11 @@ pub fn parse_stats(raw: &str) -> HashMap<String, ContainerStats> {
         };
         map.insert(
             f[0].to_string(),
-            ContainerStats { cpu, mem_bytes: mem, mem_limit_bytes: limit },
+            ContainerStats {
+                cpu,
+                mem_bytes: mem,
+                mem_limit_bytes: limit,
+            },
         );
     }
     map
@@ -273,7 +288,14 @@ mod tests {
         assert_eq!(cs.len(), 2);
         assert_eq!(cs[0].name, "acme-dev-postgres");
         assert_eq!(cs[0].health.as_deref(), Some("healthy"));
-        assert_eq!(cs[0].ports, vec![PortBinding { host: Some(55432), container: 5432, proto: "tcp".into() }]);
+        assert_eq!(
+            cs[0].ports,
+            vec![PortBinding {
+                host: Some(55432),
+                container: 5432,
+                proto: "tcp".into()
+            }]
+        );
         assert_eq!(cs[0].compose_project.as_deref(), Some("acme"));
         assert_eq!(cs[0].compose_dir.as_deref(), Some("/Users/x/Dev/acme"));
         assert_eq!(cs[1].state, "exited");
@@ -284,11 +306,19 @@ mod tests {
     fn parses_port_strings() {
         assert_eq!(
             parse_ports("0.0.0.0:3000->3000/tcp, [::]:3000->3000/tcp"),
-            vec![PortBinding { host: Some(3000), container: 3000, proto: "tcp".into() }]
+            vec![PortBinding {
+                host: Some(3000),
+                container: 3000,
+                proto: "tcp".into()
+            }]
         );
         assert_eq!(
             parse_ports("6379/tcp"),
-            vec![PortBinding { host: None, container: 6379, proto: "tcp".into() }]
+            vec![PortBinding {
+                host: None,
+                container: 6379,
+                proto: "tcp".into()
+            }]
         );
         assert!(parse_ports("").is_empty());
     }
