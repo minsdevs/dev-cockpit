@@ -19,6 +19,10 @@ pub struct ProcInfo {
     pub mem_bytes: u64,
     pub run_time_sec: u64,
     pub zombie: bool,
+    /// Parent process id (if available).
+    pub ppid: Option<i32>,
+    /// Parent process command name (if available).
+    pub parent_name: Option<String>,
 }
 
 pub struct ProcScanner {
@@ -58,7 +62,9 @@ impl ProcScanner {
 
         let mut out = HashMap::new();
         for pid in &sys_pids {
-            let Some(p) = self.sys.process(*pid) else { continue };
+            let Some(p) = self.sys.process(*pid) else {
+                continue;
+            };
             let cmd = if p.cmd().is_empty() {
                 p.name().to_string_lossy().to_string()
             } else {
@@ -68,6 +74,12 @@ impl ProcScanner {
                     .collect::<Vec<_>>()
                     .join(" ")
             };
+            let ppid = p.parent().map(|pp| pp.as_u32() as i32);
+            let parent_name = ppid.and_then(|pp| {
+                self.sys
+                    .process(Pid::from_u32(pp as u32))
+                    .map(|parent| parent.name().to_string_lossy().to_string())
+            });
             out.insert(
                 pid.as_u32() as i32,
                 ProcInfo {
@@ -79,6 +91,8 @@ impl ProcScanner {
                     mem_bytes: p.memory(),
                     run_time_sec: p.run_time(),
                     zombie: matches!(p.status(), ProcessStatus::Zombie),
+                    ppid,
+                    parent_name,
                 },
             );
         }
@@ -93,7 +107,11 @@ pub fn pgid_of(pid: i32) -> i32 {
         return 0;
     }
     let r = unsafe { libc::getpgid(pid) };
-    if r < 0 { 0 } else { r }
+    if r < 0 {
+        0
+    } else {
+        r
+    }
 }
 
 /// Is the process still alive? (signal 0 probe)
@@ -110,4 +128,26 @@ pub fn group_alive(pgid: i32) -> bool {
         return false;
     }
     unsafe { libc::kill(-pgid, 0) == 0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn measures_targeted_process_scan_overhead() {
+        let pid = std::process::id() as i32;
+        let mut scanner = ProcScanner::new();
+        let started = std::time::Instant::now();
+        for _ in 0..100 {
+            let result = scanner.refresh(&[pid]);
+            assert!(result.contains_key(&pid));
+        }
+        let elapsed = started.elapsed();
+        println!(
+            "targeted process scan: 100 samples in {:?}, average {:.3} ms/sample",
+            elapsed,
+            elapsed.as_secs_f64() * 1000.0 / 100.0
+        );
+    }
 }

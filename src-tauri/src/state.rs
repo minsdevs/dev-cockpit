@@ -1,11 +1,13 @@
 //! Shared application state managed by Tauri.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use crate::logs::LogRegistry;
 use crate::models::{AppConfig, Snapshot};
+use crate::session::RecoveryRecord;
+use crate::timeline::TimelineRegistry;
 use crate::util::now_ms;
 
 /// A child process spawned by Dev Cockpit (Start button / compose action).
@@ -19,14 +21,21 @@ pub struct ManagedChild {
     pub dir: String,
     pub command: String,
     pub started_ms: u64,
+    pub process_started_sec: u64,
+    pub command_hash: String,
+    pub preset_id: Option<String>,
     pub log_session: String,
+    pub recovered: bool,
+    pub read_only: bool,
 }
 
 pub struct AppState {
     pub config: Mutex<AppConfig>,
     pub snapshot: Mutex<Snapshot>,
     pub managed: Mutex<HashMap<String, ManagedChild>>,
+    pub recovery_records: Mutex<Vec<RecoveryRecord>>,
     pub logs: LogRegistry,
+    pub timeline: TimelineRegistry,
     /// Notification suppression after user-initiated actions: key -> expiry.
     recent_actions: Mutex<HashMap<String, u64>>,
     pub paused: AtomicBool,
@@ -34,20 +43,33 @@ pub struct AppState {
     pub scan_trigger: tokio::sync::Notify,
     pub discovery_trigger: AtomicBool,
     pub git_trigger: AtomicBool,
+    /// Preset execution progress: "project_path:preset_id" -> progress.
+    pub preset_progress: Mutex<HashMap<String, crate::preset::PresetProgress>>,
+    /// Explicit cancellation keys checked by running preset tasks.
+    pub preset_cancelled: Mutex<HashSet<String>>,
 }
 
 impl AppState {
     pub fn new(config: AppConfig) -> Self {
+        let (recovered, recovery_records) = crate::session::recover();
+        let managed = recovered
+            .into_iter()
+            .map(|child| (child.id.clone(), child))
+            .collect();
         Self {
             config: Mutex::new(config),
             snapshot: Mutex::new(Snapshot::default()),
-            managed: Mutex::new(HashMap::new()),
+            managed: Mutex::new(managed),
+            recovery_records: Mutex::new(recovery_records),
             logs: LogRegistry::new(),
+            timeline: TimelineRegistry::new(),
             recent_actions: Mutex::new(HashMap::new()),
             paused: AtomicBool::new(false),
             scan_trigger: tokio::sync::Notify::new(),
             discovery_trigger: AtomicBool::new(true),
             git_trigger: AtomicBool::new(false),
+            preset_progress: Mutex::new(HashMap::new()),
+            preset_cancelled: Mutex::new(HashSet::new()),
         }
     }
 

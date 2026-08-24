@@ -87,7 +87,13 @@ pub fn parse_status(raw: &str) -> GitInfo {
             dirty += 1;
         }
     }
-    GitInfo { branch, dirty_count: dirty, ahead, behind, last_commit: None }
+    GitInfo {
+        branch,
+        dirty_count: dirty,
+        ahead,
+        behind,
+        last_commit: None,
+    }
 }
 
 pub fn parse_log(raw: &str) -> Option<CommitInfo> {
@@ -132,7 +138,8 @@ mod tests {
 
     #[test]
     fn parses_log_line() {
-        let c = parse_log("deadbeefcafe1234\u{1f}fix: things\u{1f}Alice\u{1f}1723500000\n").unwrap();
+        let c =
+            parse_log("deadbeefcafe1234\u{1f}fix: things\u{1f}Alice\u{1f}1723500000\n").unwrap();
         assert_eq!(c.hash, "deadbeefca");
         assert_eq!(c.summary, "fix: things");
         assert_eq!(c.epoch_sec, 1723500000);

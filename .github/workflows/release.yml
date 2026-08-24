@@ -1,0 +1,181 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: 'Release channel'
+        required: true
+        default: 'stable'
+        type: choice
+        options:
+          - stable
+          - beta
+      version:
+        description: 'Version tag (e.g., 1.2.0)'
+        required: true
+        type: string
+
+env:
+  APP_NAME: "Dev Cockpit"
+  BUNDLE_ID: "com.min0504.devcockpit"
+
+jobs:
+  build-and-release:
+    runs-on: macos-14  # Apple Silicon runner
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build Tauri app
+        run: |
+          cd src-tauri
+          cargo build --release
+          cd ..
+
+      - name: Bundle app
+        run: |
+          # Tauri bundles the .app during build
+          APP_PATH="src-tauri/target/release/bundle/macos/Dev Cockpit.app"
+          if [[ ! -d "$APP_PATH" ]]; then
+            echo "error: app bundle not found at expected path"
+            exit 1
+          fi
+          echo "APP_PATH=$APP_PATH" >> $GITHUB_ENV
+
+      # ---------------------------------------------------------------
+      # Code signing and notarization
+      # 🟡 Requires secrets: APPLE_DEVELOPER_ID_APPLICATION,
+      #    APPLE_ID, APPLE_APP_PASSWORD, APPLE_TEAM_ID
+      # ---------------------------------------------------------------
+      - name: Sign and Notarize
+        env:
+          APPLE_DEVELOPER_ID_APPLICATION: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [[ -z "$APPLE_DEVELOPER_ID_APPLICATION" ]]; then
+            echo "⚠️  Signing secrets not configured — skipping sign+notarize"
+            echo "SIGNED=false" >> $GITHUB_ENV
+          else
+            ./scripts/sign-and-notarize.sh "$APP_PATH"
+            echo "SIGNED=true" >> $GITHUB_ENV
+          fi
+
+      - name: Create distribution ZIP
+        run: |
+          VERSION="${{ inputs.version }}"
+          ZIP_NAME="Dev-Cockpit-${VERSION}-macos-aarch64.zip"
+          ditto -c -k --keepParent "$APP_PATH" "$ZIP_NAME"
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+
+          # Compute SHA-256
+          SHA=$(shasum -a 256 "$ZIP_NAME" | cut -d' ' -f1)
+          echo "SHA256=$SHA" >> $GITHUB_ENV
+
+      - name: Generate update manifest
+        run: |
+          VERSION="${{ inputs.version }}"
+          CHANNEL="${{ inputs.channel }}"
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/v${VERSION}/${ZIP_NAME}"
+
+          cat > update-manifest.json <<EOF
+          {
+            "version": "${VERSION}",
+            "channel": "${CHANNEL}",
+            "sha256": "${SHA256}",
+            "downloadUrl": "${DOWNLOAD_URL}",
+            "releaseNotes": "Release ${VERSION} (${CHANNEL})",
+            "publishedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "signature": "PLACEHOLDER_SIGN_WITH_ED25519_KEY"
+          }
+          EOF
+
+          echo "🟡 Manifest signature is a placeholder — sign with ed25519 key in production"
+
+      - name: Enforce release gates before publishing
+        run: |
+          if [[ "$SIGNED" != "true" ]]; then
+            echo "::error::Release publishing requires a signed and notarized app."
+            exit 1
+          fi
+          if grep -q '"signature": "PLACEHOLDER_' update-manifest.json; then
+            echo "::error::Release publishing requires a real Ed25519 manifest signature."
+            exit 1
+          fi
+          if grep -q 'const UPDATE_PUBLIC_KEY: &str = "PLACEHOLDER_' src-tauri/src/updater.rs; then
+            echo "::error::Release publishing requires the matching Ed25519 public key in the app."
+            exit 1
+          fi
+
+      # ---------------------------------------------------------------
+      # 🟡 TODO: Sign the update manifest with ed25519 private key
+      # In production, use a step like:
+      #   echo -n "$(cat update-manifest-unsigned.json)" | \
+      #     openssl pkeyutl -sign -inkey ed25519_private.pem | base64
+      # Then inject the signature into the manifest.
+      # ---------------------------------------------------------------
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          name: "Dev Cockpit v${{ inputs.version }}${{ inputs.channel == 'beta' && ' (Beta)' || '' }}"
+          prerelease: ${{ inputs.channel == 'beta' }}
+          generate_release_notes: true
+          files: |
+            ${{ env.ZIP_NAME }}
+            update-manifest.json
+          body: |
+            ## Dev Cockpit v${{ inputs.version }}
+
+            **Channel:** ${{ inputs.channel }}
+            **Signed:** ${{ env.SIGNED }}
+            **SHA-256:** `${{ env.SHA256 }}`
+
+            ${{ env.SIGNED == 'false' && '⚠️ This release is NOT code-signed. See docs/SIGNING.md for details.' || '✅ Code-signed and notarized.' }}
+
+      - name: Verify release integrity
+        run: |
+          echo "=== Release Summary ==="
+          echo "Version: ${{ inputs.version }}"
+          echo "Channel: ${{ inputs.channel }}"
+          echo "ZIP: ${{ env.ZIP_NAME }}"
+          echo "SHA-256: ${{ env.SHA256 }}"
+          echo "Signed: ${{ env.SIGNED }}"
+
+          # Fail CI if this is a stable release without signing
+          if [[ "${{ inputs.channel }}" == "stable" && "${{ env.SIGNED }}" == "false" ]]; then
+            echo "::error::Stable release MUST be signed. Configure signing secrets."
+            exit 1
+          fi

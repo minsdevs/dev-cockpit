@@ -15,6 +15,8 @@ import { ServiceRow } from "./components/ServiceRow";
 import { ContainerRow } from "./components/ContainerRow";
 import { LogsView } from "./components/LogsView";
 import { SettingsView } from "./components/SettingsView";
+import { PresetPanel } from "./components/PresetPanel";
+import { TimelinePanel } from "./components/TimelinePanel";
 import {
   IconChevron,
   IconGear,
@@ -30,6 +32,8 @@ import {
 type SheetState =
   | { kind: "settings" }
   | { kind: "logs"; session: string; title: string }
+  | { kind: "presets"; project: import("./types").ProjectView }
+  | { kind: "timeline"; project: import("./types").ProjectView }
   | null;
 
 export default function App() {
@@ -74,8 +78,19 @@ export default function App() {
 
   const cb: ProjectCallbacks = useMemo(
     () => ({
-      onStop: (pid, force) => {
-        ipc.stopService(pid, force ?? false).catch((e) => push(String(e)));
+      onStop: (pid, force, confirmed) => {
+        ipc.stopService(pid, force ?? false, confirmed).catch((e) => {
+          const msg = String(e);
+          if (msg.startsWith("confirmation_required:")) {
+            // Show confirmation dialog for low-attribution processes
+            const detail = msg.slice("confirmation_required:".length);
+            if (window.confirm(`⚠️ Stop process?\n\n${detail}`)) {
+              ipc.stopService(pid, force ?? false, true).catch((e2) => push(String(e2)));
+            }
+          } else {
+            push(msg);
+          }
+        });
       },
       onStart: (projectPath, serviceName) => {
         ipc
@@ -122,6 +137,12 @@ export default function App() {
         const cur = overrides[path] ?? { name: null, commands: {}, healthUrl: null };
         overrides[path] = { ...cur, commands: { ...cur.commands, [serviceName]: command } };
         save({ ...config, projectOverrides: overrides }).catch((e) => push(String(e)));
+      },
+      onPresets: (project) => {
+        setSheet({ kind: "presets", project });
+      },
+      onTimeline: (project) => {
+        setSheet({ kind: "timeline", project });
       },
     }),
     [config, save, push, openLogs],
@@ -342,6 +363,14 @@ export default function App() {
       )}
       {sheet?.kind === "logs" && (
         <LogsView session={sheet.session} title={sheet.title} onClose={() => setSheet(null)} />
+      )}
+
+      {sheet?.kind === "presets" && (
+        <PresetPanel project={sheet.project} onClose={() => setSheet(null)} push={push} />
+      )}
+
+      {sheet?.kind === "timeline" && (
+        <TimelinePanel project={sheet.project} onClose={() => setSheet(null)} push={push} />
       )}
 
       {toasts.length > 0 && (

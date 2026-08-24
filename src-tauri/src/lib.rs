@@ -2,15 +2,23 @@
 //! App wiring: tray, panel window behavior, global shortcut, plugins,
 //! background monitor.
 
+pub mod backup;
 pub mod commands;
 pub mod config;
 pub mod control;
+pub mod launch;
 pub mod logs;
 pub mod models;
 pub mod monitor;
 pub mod notify;
+pub mod preflight;
+pub mod preset;
 pub mod scan;
+pub mod session;
 pub mod state;
+pub mod timeline;
+pub mod tools;
+pub mod updater;
 pub mod util;
 
 use tauri::menu::{CheckMenuItem, MenuBuilder, MenuItem, PredefinedMenuItem};
@@ -57,7 +65,8 @@ fn show_panel(app: &AppHandle, anchor: Option<tauri::Rect>) {
     let _ = win.set_focus();
     // Fresh data the moment the panel opens.
     let st = app.state::<AppState>();
-    st.git_trigger.store(true, std::sync::atomic::Ordering::Relaxed);
+    st.git_trigger
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     st.request_scan();
 }
 
@@ -117,6 +126,26 @@ pub fn run() {
             commands::is_paused,
             commands::hide_panel,
             commands::quit_app,
+            commands::run_preset,
+            commands::stop_preset,
+            commands::get_preset_progress,
+            commands::save_preset,
+            commands::delete_preset,
+            commands::preflight_preset,
+            commands::get_recovery_records,
+            commands::list_launch_targets,
+            commands::save_launch_target,
+            commands::open_launch_target,
+            commands::open_launch_when_ready,
+            commands::get_project_timeline,
+            commands::create_diagnostic_bundle,
+            commands::export_settings_backup,
+            commands::preview_settings_import,
+            commands::apply_settings_import,
+            commands::check_for_update,
+            commands::launch_dev_finder,
+            commands::get_dev_finder_command,
+            commands::open_code_intelligence,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -126,6 +155,19 @@ pub fn run() {
 
             let state = app.state::<AppState>();
             state.logs.spawn_flusher(app.handle().clone());
+            {
+                let mut managed = state.managed.lock().expect("managed lock");
+                for child in managed.values_mut().filter(|child| child.recovered) {
+                    child.log_session = state.logs.open_recovered(
+                        app.handle(),
+                        &child.id,
+                        &format!("{} — recovered", child.name),
+                        child.project_path.clone(),
+                        Some(child.name.clone()),
+                    );
+                }
+            }
+            session::spawn_recovery_watchers(app.handle().clone());
             monitor::spawn(app.handle().clone());
             Ok(())
         })
@@ -159,11 +201,19 @@ pub fn run() {
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open Dev Cockpit", true, Some("ctrl+alt+d"))?;
     let scan = MenuItem::with_id(app, "scan", "Rescan Now", true, None::<&str>)?;
-    let pause = CheckMenuItem::with_id(app, "pause", "Pause Monitoring", true, false, None::<&str>)?;
+    let pause =
+        CheckMenuItem::with_id(app, "pause", "Pause Monitoring", true, false, None::<&str>)?;
     let autostart = {
         use tauri_plugin_autostart::ManagerExt;
         let enabled = app.autolaunch().is_enabled().unwrap_or(false);
-        CheckMenuItem::with_id(app, "autostart", "Launch at Login", true, enabled, None::<&str>)?
+        CheckMenuItem::with_id(
+            app,
+            "autostart",
+            "Launch at Login",
+            true,
+            enabled,
+            None::<&str>,
+        )?
     };
     let quit = MenuItem::with_id(app, "quit", "Quit Dev Cockpit", true, Some("cmd+q"))?;
     let menu = MenuBuilder::new(app)
@@ -184,7 +234,13 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click { button, button_state, rect, .. } = event {
+            if let TrayIconEvent::Click {
+                button,
+                button_state,
+                rect,
+                ..
+            } = event
+            {
                 if button == MouseButton::Left && button_state == MouseButtonState::Up {
                     toggle_panel(tray.app_handle(), Some(rect));
                 }

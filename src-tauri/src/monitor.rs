@@ -9,12 +9,12 @@ use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::models::{GitInfo, Health, HealthLevel, ServiceKind, Snapshot};
+use crate::models::{GitInfo, HealthLevel, ServiceKind, Snapshot};
 use crate::notify::Notifier;
 use crate::scan::docker::{self, ContainerStats, DockerState};
 use crate::scan::link::{self, LinkInput};
-use crate::scan::projects::{self, ProjectStatic};
 use crate::scan::procs::ProcScanner;
+use crate::scan::projects::{self, ProjectStatic};
 use crate::scan::{git, health, ports};
 use crate::state::AppState;
 use crate::util::now_ms;
@@ -36,6 +36,10 @@ struct Core {
     seq: u64,
     last_tick_ms: u64,
     last_tray: String,
+    /// Per-service consecutive failure count for backoff.
+    health_failures: HashMap<String, u32>,
+    /// Per-service last check timestamp for backoff timing.
+    health_last_check: HashMap<String, u64>,
 }
 
 pub fn spawn(app: AppHandle) {
@@ -58,6 +62,8 @@ async fn run(app: AppHandle) {
         seq: 0,
         last_tick_ms: 0,
         last_tray: String::from("\u{0}"), // force first tray update
+        health_failures: HashMap::new(),
+        health_last_check: HashMap::new(),
     };
 
     loop {
@@ -73,15 +79,14 @@ async fn run(app: AppHandle) {
         let t0 = Instant::now();
         let now = now_ms();
         // Sleep/wake or long stall → resync cycle (no "stopped" alerts).
-        let resync =
-            core.last_tick_ms > 0 && now.saturating_sub(core.last_tick_ms) > cfg.poll_interval_ms * 3 + 2000;
+        let resync = core.last_tick_ms > 0
+            && now.saturating_sub(core.last_tick_ms) > cfg.poll_interval_ms * 3 + 2000;
 
         tick(&app, &mut core, &cfg, now, resync).await;
 
         core.last_tick_ms = now;
         let state = app.state::<AppState>();
-        let budget =
-            Duration::from_millis(cfg.poll_interval_ms).saturating_sub(t0.elapsed());
+        let budget = Duration::from_millis(cfg.poll_interval_ms).saturating_sub(t0.elapsed());
         tokio::select! {
             _ = tokio::time::sleep(budget) => {},
             _ = state.scan_trigger.notified() => {
@@ -172,8 +177,7 @@ async fn tick(
             && now.saturating_sub(core.stats_at) >= cfg.docker_stats_interval_ms
         {
             core.stats_at = now;
-            if let Ok(Ok(stats)) =
-                tauri::async_runtime::spawn_blocking(docker::sample_stats).await
+            if let Ok(Ok(stats)) = tauri::async_runtime::spawn_blocking(docker::sample_stats).await
             {
                 core.stats = stats;
             }
@@ -248,7 +252,8 @@ async fn tick(
         }
     }
     let discovery_paths: HashSet<&str> = core.discovery.iter().map(|p| p.path.as_str()).collect();
-    core.git_cache.retain(|k, _| discovery_paths.contains(k.as_str()));
+    core.git_cache
+        .retain(|k, _| discovery_paths.contains(k.as_str()));
     let git_map: HashMap<String, GitInfo> = core
         .git_cache
         .iter()
@@ -269,11 +274,22 @@ async fn tick(
     });
 
     // ---- 7. health checks (parallel, bounded by service count) ----
-    run_health_checks(&mut snap, cfg.http_health).await;
+    run_health_checks(
+        &mut snap,
+        cfg,
+        now,
+        &mut core.health_failures,
+        &mut core.health_last_check,
+    )
+    .await;
 
     snap.scan_ms = now_ms().saturating_sub(now);
 
-    // ---- 8. notify (every tick, before dedup-emit) ----
+    // ---- 8. project timeline transitions (bounded and non-blocking) ----
+    let previous_snapshot = state.snapshot_clone();
+    state.timeline.observe_snapshot(&previous_snapshot, &snap);
+
+    // ---- 9. notify (every tick, before dedup-emit) ----
     core.notifier
         .process(app, &state, &cfg.notifications, &snap, resync);
 
@@ -322,12 +338,25 @@ fn round_mem(bytes: u64) -> u64 {
 }
 
 /// TCP + HTTP probes for every running service with a port.
-async fn run_health_checks(snap: &mut Snapshot, http_enabled: bool) {
+/// Protocol selection: per-service config > auto (is_http flag) > TCP-only default.
+/// Implements exponential backoff on repeated failures.
+async fn run_health_checks(
+    snap: &mut Snapshot,
+    cfg: &crate::models::AppConfig,
+    now: u64,
+    failures: &mut HashMap<String, u32>,
+    last_check: &mut HashMap<String, u64>,
+) {
     struct Check {
         id: String,
         port: u16,
-        is_http: bool,
+        method: String,
+        http_method: String,
+        http_path: String,
+        expected_status: Vec<u16>,
+        prev_failures: u32,
     }
+    let base_interval = cfg.poll_interval_ms;
     let mut checks: Vec<Check> = Vec::new();
     for s in snap
         .projects
@@ -335,11 +364,74 @@ async fn run_health_checks(snap: &mut Snapshot, http_enabled: bool) {
         .flat_map(|p| p.services.iter())
         .chain(snap.orphan_services.iter())
     {
-        if s.kind == ServiceKind::Process {
-            if let Some(port) = s.first_port() {
-                checks.push(Check { id: s.id.clone(), port, is_http: s.is_http });
+        if s.kind != ServiceKind::Process {
+            continue;
+        }
+        let Some(port) = s.first_port() else { continue };
+
+        // Resolve health check config from project overrides
+        let mut method = "auto".to_string();
+        let mut http_method = "GET".to_string();
+        let mut http_path = "/".to_string();
+        let mut expected_status: Vec<u16> = Vec::new();
+        let mut service_interval_ms: u64 = 0;
+
+        if let Some(project_path) = &s.project_path {
+            if let Some(ov) = cfg.project_overrides.get(project_path) {
+                if let Some(hc) = ov.health_checks.get(&s.name) {
+                    if !hc.method.is_empty() {
+                        method = hc.method.clone();
+                    }
+                    if !hc.path.is_empty() {
+                        http_path = hc.path.clone();
+                    }
+                    if !hc.http_method.is_empty() {
+                        http_method = hc.http_method.clone();
+                    }
+                    expected_status = hc.expected_status.clone();
+                    service_interval_ms = hc.interval_ms;
+                }
+                // Legacy health_url override (backward compat)
+                if method == "auto" || method == "http" {
+                    if let Some(url) = &ov.health_url {
+                        if !url.is_empty() {
+                            method = "http".to_string();
+                            http_path = url.clone();
+                        }
+                    }
+                }
             }
         }
+
+        // Resolve "auto" → actual method based on is_http flag
+        let resolved = health::resolve_method(&method, s.is_http);
+        let effective_method = resolved.to_string();
+
+        // Check backoff: skip if not due yet
+        // Use per-service interval override if set (> 0), else global poll_interval_ms
+        let prev_failures = failures.get(&s.id).copied().unwrap_or(0);
+        let multiplier = health::backoff_multiplier(prev_failures) as u64;
+        let svc_base = if service_interval_ms > 0 {
+            service_interval_ms
+        } else {
+            base_interval
+        };
+        let effective_interval = svc_base * multiplier;
+        if let Some(&last) = last_check.get(&s.id) {
+            if now.saturating_sub(last) < effective_interval {
+                continue; // skip, still in backoff
+            }
+        }
+
+        checks.push(Check {
+            id: s.id.clone(),
+            port,
+            method: effective_method,
+            http_method,
+            http_path,
+            expected_status,
+            prev_failures,
+        });
     }
     if checks.is_empty() {
         return;
@@ -348,56 +440,85 @@ async fn run_health_checks(snap: &mut Snapshot, http_enabled: bool) {
         .into_iter()
         .map(|c| {
             tauri::async_runtime::spawn_blocking(move || {
-                let tcp = health::tcp_check(c.port);
-                let http = if tcp && http_enabled && c.is_http {
-                    health::http_check(c.port)
-                } else {
-                    None
-                };
-                (c.id, tcp, http)
+                let result = health::check_service(
+                    c.port,
+                    &c.method,
+                    &c.http_method,
+                    &c.http_path,
+                    &c.expected_status,
+                );
+                (c.id, result, c.prev_failures)
             })
         })
         .collect();
-    let mut results: HashMap<String, (bool, Option<u16>)> = HashMap::new();
+    let mut results: HashMap<String, (health::HealthResult, u32)> = HashMap::new();
     for h in handles {
-        if let Ok((id, tcp, http)) = h.await {
-            results.insert(id, (tcp, http));
+        if let Ok((id, result, prev)) = h.await {
+            results.insert(id, (result, prev));
         }
     }
-    let apply = |s: &mut crate::models::Service| {
-        if let Some((tcp, http)) = results.get(&s.id) {
-            let level = if !tcp {
+    // Apply results to the snapshot and update backoff state
+    let apply = |s: &mut crate::models::Service,
+                 failures: &mut HashMap<String, u32>,
+                 last_check_map: &mut HashMap<String, u64>| {
+        if let Some((result, _prev)) = results.get(&s.id) {
+            last_check_map.insert(s.id.clone(), now);
+
+            let has_failure = result.failure_reason.is_some();
+            let consecutive = if has_failure {
+                let n = failures.entry(s.id.clone()).or_insert(0);
+                *n = n.saturating_add(1);
+                *n
+            } else {
+                failures.remove(&s.id);
+                0
+            };
+
+            let level = if !result.tcp_ok {
                 HealthLevel::Down
-            } else if matches!(http, Some(code) if *code >= 500) {
+            } else if result.failure_reason.is_some() {
                 HealthLevel::Warn
             } else {
                 HealthLevel::Ok
             };
-            s.health = Health {
-                tcp: Some(*tcp),
-                http_status: *http,
+
+            s.health = crate::models::Health {
+                tcp: Some(result.tcp_ok),
+                http_status: result.http_status,
                 level: Some(level),
-                detail: if !tcp {
-                    Some("port not accepting connections".into())
-                } else {
-                    None
-                },
+                detail: result.failure_reason.clone(),
+                consecutive_failures: consecutive,
+                check_method: Some(result.method_used.to_string()),
             };
         }
     };
     for p in snap.projects.iter_mut() {
         for s in p.services.iter_mut() {
-            apply(s);
+            apply(s, failures, last_check);
         }
     }
     for s in snap.orphan_services.iter_mut() {
-        apply(s);
+        apply(s, failures, last_check);
     }
+    // Prune stale entries (services that no longer exist)
+    let active_ids: HashSet<String> = snap
+        .projects
+        .iter()
+        .flat_map(|p| p.services.iter())
+        .chain(snap.orphan_services.iter())
+        .map(|s| s.id.clone())
+        .collect();
+    failures.retain(|k, _| active_ids.contains(k));
+    last_check.retain(|k, _| active_ids.contains(k));
 }
 
 fn update_tray(app: &AppHandle, core: &mut Core, snap: &Snapshot) {
     let n = snap.totals.running_services + snap.totals.running_containers;
-    let title = if n == 0 { String::new() } else { format!(" {n}") };
+    let title = if n == 0 {
+        String::new()
+    } else {
+        format!(" {n}")
+    };
     let tooltip = format!(
         "Dev Cockpit — {} services · {} containers · {} ports{}",
         snap.totals.running_services,

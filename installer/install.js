@@ -27,21 +27,29 @@ function fail(msg) {
 }
 
 function parseArgs(argv) {
-  const args = { dir: null, open: true };
+  const args = { dir: null, open: true, channel: "stable", preserveSettings: true };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dir") {
       args.dir = argv[++i] || fail("--dir requires a path");
     } else if (a === "--no-open") {
       args.open = false;
+    } else if (a === "--channel") {
+      const ch = argv[++i];
+      if (ch !== "stable" && ch !== "beta") fail("--channel must be stable or beta");
+      args.channel = ch;
+    } else if (a === "--no-preserve") {
+      args.preserveSettings = false;
     } else if (a === "--help" || a === "-h") {
       console.log(
         `Dev Cockpit installer v${APP_VERSION}\n\n` +
           `Usage: npx @min0504/dev-cockpit [options]\n\n` +
           `Options:\n` +
-          `  --dir <path>   Install directory (default: /Applications, falls back to ~/Applications)\n` +
-          `  --no-open      Do not launch the app after installing\n` +
-          `  -h, --help     Show this help\n`
+          `  --dir <path>     Install directory (default: /Applications, falls back to ~/Applications)\n` +
+          `  --no-open        Do not launch the app after installing\n` +
+          `  --channel <ch>   Update channel: stable (default) or beta\n` +
+          `  --no-preserve    Do not preserve existing settings during update\n` +
+          `  -h, --help       Show this help\n`
       );
       process.exit(0);
     } else {
@@ -101,17 +109,49 @@ async function main() {
   const installDir = pickInstallDir(args.dir);
   const appPath = path.join(installDir, APP_NAME);
 
+  // --- Settings preservation ---
+  const configDir = path.join(os.homedir(), ".config", "dev-cockpit");
+  const backupDir = path.join(os.homedir(), ".config", "dev-cockpit.backup");
+  if (args.preserveSettings && fs.existsSync(configDir)) {
+    console.log("preserving existing settings...");
+    if (fs.existsSync(backupDir)) {
+      fs.rmSync(backupDir, { recursive: true, force: true });
+    }
+    fs.cpSync(configDir, backupDir, { recursive: true });
+  }
+
+  // --- Keep previous version for rollback ---
+  const previousPath = path.join(installDir, "Dev Cockpit.previous.app");
   if (fs.existsSync(appPath)) {
-    console.log(`replacing existing ${appPath}`);
-    fs.rmSync(appPath, { recursive: true, force: true });
+    console.log(`keeping previous version at: ${previousPath}`);
+    if (fs.existsSync(previousPath)) {
+      fs.rmSync(previousPath, { recursive: true, force: true });
+    }
+    fs.renameSync(appPath, previousPath);
   }
 
   // ditto preserves bundle structure, permissions and extended attributes.
   const extract = spawnSync("ditto", ["-x", "-k", tmpZip, installDir], { stdio: "inherit" });
   if (extract.status !== 0) {
+    // Restore previous version on failure
+    if (fs.existsSync(previousPath)) {
+      console.log("extraction failed — restoring previous version");
+      fs.renameSync(previousPath, appPath);
+    }
+    // Restore settings
+    if (args.preserveSettings && fs.existsSync(backupDir)) {
+      if (fs.existsSync(configDir)) fs.rmSync(configDir, { recursive: true, force: true });
+      fs.cpSync(backupDir, configDir, { recursive: true });
+    }
     fail("extraction failed (ditto)");
   }
   fs.rmSync(path.dirname(tmpZip), { recursive: true, force: true });
+
+  // Restore settings (they persist in configDir, but verify)
+  if (args.preserveSettings && fs.existsSync(backupDir)) {
+    // Settings should still be in place, backup is kept for manual rollback
+    console.log("settings preserved (backup at ~/.config/dev-cockpit.backup/)");
+  }
 
   // The app is not code-signed; strip the quarantine flag so Gatekeeper
   // does not block the first launch. Harmless if the attribute is absent.

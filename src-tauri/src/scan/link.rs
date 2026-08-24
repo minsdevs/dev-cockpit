@@ -38,6 +38,28 @@ pub struct LinkInput<'a> {
     pub errors: Vec<String>,
 }
 
+/// Compute attribution level and reason for a process linked to a project.
+fn compute_attribution(
+    managed_flag: bool,
+    cwd: Option<&Path>,
+    project_path: &str,
+    _compose_linked: bool,
+) -> (AttributionLevel, &'static str) {
+    if managed_flag {
+        return (AttributionLevel::High, "managed by Dev Cockpit");
+    }
+    if let Some(cwd) = cwd {
+        let cwd_str = cwd.to_string_lossy();
+        if cwd_str == project_path {
+            return (AttributionLevel::High, "cwd matches project root");
+        }
+        if cwd_str.starts_with(&format!("{}/", project_path)) {
+            return (AttributionLevel::Medium, "cwd within project tree");
+        }
+    }
+    (AttributionLevel::Low, "indirect match (name or parent)")
+}
+
 fn quantize_start(ms: u64) -> u64 {
     (ms / 5000) * 5000
 }
@@ -69,10 +91,7 @@ pub fn assemble(input: LinkInput<'_>) -> Snapshot {
         let dir_str = dir.to_string_lossy();
         proj_paths
             .iter()
-            .find(|p| {
-                dir_str == p.path.as_str()
-                    || dir_str.starts_with(&format!("{}/", p.path))
-            })
+            .find(|p| dir_str == p.path.as_str() || dir_str.starts_with(&format!("{}/", p.path)))
             .copied()
     };
 
@@ -96,7 +115,11 @@ pub fn assemble(input: LinkInput<'_>) -> Snapshot {
             .get(pid)
             .map(|p| p.name.clone())
             .unwrap_or_else(|| ls[0].process.clone());
-        let cmd = input.procs.get(pid).map(|p| p.cmd.clone()).unwrap_or_default();
+        let cmd = input
+            .procs
+            .get(pid)
+            .map(|p| p.cmd.clone())
+            .unwrap_or_default();
         if let Some(det) = detect::from_process(&name, &cmd) {
             if det.key == "docker" {
                 docker_infra_pids.insert(*pid);
@@ -114,6 +137,10 @@ pub fn assemble(input: LinkInput<'_>) -> Snapshot {
         service: Service,
         project: Option<String>, // project path
         noise: bool,
+        #[allow(dead_code)]
+        attribution: Option<AttributionLevel>,
+        #[allow(dead_code)]
+        attribution_reason: Option<&'static str>,
     }
     let mut built: Vec<Built> = Vec::new();
 
@@ -125,7 +152,9 @@ pub fn assemble(input: LinkInput<'_>) -> Snapshot {
         if proc.map(|p| p.zombie).unwrap_or(false) {
             continue;
         }
-        let name = proc.map(|p| p.name.clone()).unwrap_or_else(|| ls[0].process.clone());
+        let name = proc
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| ls[0].process.clone());
         let cmd_full = proc.map(|p| p.cmd.clone()).unwrap_or_default();
         let cwd: Option<PathBuf> = proc.and_then(|p| p.cwd.clone());
 
@@ -139,7 +168,10 @@ pub fn assemble(input: LinkInput<'_>) -> Snapshot {
 
         // Sub-package naming: a process whose cwd is a workspace package dir
         // gets that package's name ("web", "api"…).
-        let mut display = det.as_ref().map(|d| d.label.to_string()).unwrap_or_else(|| name.clone());
+        let mut display = det
+            .as_ref()
+            .map(|d| d.label.to_string())
+            .unwrap_or_else(|| name.clone());
         let mut fw_key = det.as_ref().map(|d| d.key.to_string());
         let mut fw_label = det.as_ref().map(|d| d.label.to_string());
         let mut start_command: Option<String> = None;
@@ -147,10 +179,20 @@ pub fn assemble(input: LinkInput<'_>) -> Snapshot {
 
         if let Some(p) = project {
             service_project = Some(p.path.clone());
-            let cwd_str = cwd.as_ref().map(|c| c.to_string_lossy().to_string()).unwrap_or_default();
+            let cwd_str = cwd
+                .as_ref()
+                .map(|c| c.to_string_lossy().to_string())
+                .unwrap_or_default();
             if let Some(sub) = p.subpackages.iter().find(|s| s.dir == cwd_str) {
                 display = sub.name.clone();
-                if matches!(fw_key.as_deref(), None | Some("node") | Some("python") | Some("bun") | Some("deno") | Some("node-dev")) {
+                if matches!(
+                    fw_key.as_deref(),
+                    None | Some("node")
+                        | Some("python")
+                        | Some("bun")
+                        | Some("deno")
+                        | Some("node-dev")
+                ) {
                     if let (Some(k), Some(l)) = (&sub.framework_key, &sub.framework_label) {
                         fw_key = Some(k.clone());
                         fw_label = Some(l.clone());
@@ -172,8 +214,8 @@ pub fn assemble(input: LinkInput<'_>) -> Snapshot {
             // Config override wins.
             if let Some(ov) = cfg.project_overrides.get(&p.path) {
                 for (svc_name, cmd) in &ov.commands {
-                    let matches_name = svc_name == &display
-                        || (svc_name == "." && cwd_str == p.path);
+                    let matches_name =
+                        svc_name == &display || (svc_name == "." && cwd_str == p.path);
                     if matches_name && !cmd.trim().is_empty() {
                         start_command = Some(cmd.clone());
                     }
@@ -184,7 +226,7 @@ pub fn assemble(input: LinkInput<'_>) -> Snapshot {
         let is_http = det
             .as_ref()
             .map(|d| detect::is_http_category(d.category))
-            .unwrap_or(service_project.is_some());
+            .unwrap_or(false);
 
         // Managed merge (same process group as a child we spawned).
         let mut managed_flag = false;
@@ -206,6 +248,15 @@ pub fn assemble(input: LinkInput<'_>) -> Snapshot {
         let id = match &service_project {
             Some(p) => format!("svc:{p}:{display}:{}", ports.first().copied().unwrap_or(0)),
             None => format!("proc:{name}:{}", ports.first().copied().unwrap_or(0)),
+        };
+
+        // Compute attribution confidence
+        let (attr_level, attr_reason) = if let Some(proj_path) = &service_project {
+            let (level, reason) =
+                compute_attribution(managed_flag, cwd.as_deref(), proj_path, false);
+            (Some(level), Some(reason))
+        } else {
+            (None, None)
         };
 
         let service = Service {
@@ -230,8 +281,18 @@ pub fn assemble(input: LinkInput<'_>) -> Snapshot {
             project_path: service_project.clone(),
             start_command,
             is_http,
+            attribution: attr_level,
+            attribution_reason: attr_reason.map(String::from),
+            parent_pid: proc.and_then(|p| p.ppid),
+            parent_command: proc.and_then(|p| p.parent_name.clone()),
         };
-        built.push(Built { service, project: service_project, noise });
+        built.push(Built {
+            service,
+            project: service_project,
+            noise,
+            attribution: attr_level,
+            attribution_reason: attr_reason,
+        });
     }
 
     // Deduplicate display names within a project (e.g. two plain `node`s).
@@ -290,6 +351,8 @@ pub fn assemble(input: LinkInput<'_>) -> Snapshot {
                         http_status: None,
                         level: Some(HealthLevel::Unknown),
                         detail: Some("starting".into()),
+                        consecutive_failures: 0,
+                        check_method: None,
                     },
                     managed: true,
                     managed_id: Some(m.id.clone()),
@@ -297,9 +360,15 @@ pub fn assemble(input: LinkInput<'_>) -> Snapshot {
                     project_path: project.clone(),
                     start_command: Some(m.command.clone()),
                     is_http: false,
+                    attribution: Some(AttributionLevel::High),
+                    attribution_reason: Some("managed by Dev Cockpit".into()),
+                    parent_pid: None,
+                    parent_command: None,
                 },
                 project,
                 noise: false,
+                attribution: Some(AttributionLevel::High),
+                attribution_reason: Some("managed by Dev Cockpit"),
             });
         }
     }
@@ -361,14 +430,23 @@ pub fn assemble(input: LinkInput<'_>) -> Snapshot {
             .collect();
 
         // Startables not superseded by a running process.
-        let running_dirs: HashSet<String> =
-            services.iter().filter_map(|s| s.cwd.clone()).collect();
+        let running_dirs: HashSet<String> = services.iter().filter_map(|s| s.cwd.clone()).collect();
         let any_node_running = services.iter().any(|s| {
             matches!(
                 s.framework_key.as_deref(),
-                Some("vite") | Some("nextjs") | Some("nestjs") | Some("cra") | Some("remix")
-                    | Some("astro") | Some("nuxt") | Some("sveltekit") | Some("angular")
-                    | Some("node") | Some("node-dev") | Some("webpack") | Some("expo")
+                Some("vite")
+                    | Some("nextjs")
+                    | Some("nestjs")
+                    | Some("cra")
+                    | Some("remix")
+                    | Some("astro")
+                    | Some("nuxt")
+                    | Some("sveltekit")
+                    | Some("angular")
+                    | Some("node")
+                    | Some("node-dev")
+                    | Some("webpack")
+                    | Some("expo")
             )
         });
         let mut startable_names: HashSet<String> = HashSet::new();
@@ -410,6 +488,10 @@ pub fn assemble(input: LinkInput<'_>) -> Snapshot {
                 project_path: Some(ps.path.clone()),
                 start_command: Some(command),
                 is_http: spec.is_http,
+                attribution: None,
+                attribution_reason: None,
+                parent_pid: None,
+                parent_command: None,
             });
         }
         // Extra user-defined commands (override entries with unknown names).
@@ -443,6 +525,10 @@ pub fn assemble(input: LinkInput<'_>) -> Snapshot {
                         project_path: Some(ps.path.clone()),
                         start_command: Some(cmd.clone()),
                         is_http: true,
+                        attribution: None,
+                        attribution_reason: None,
+                        parent_pid: None,
+                        parent_command: None,
                     });
                 }
             }
@@ -453,12 +539,20 @@ pub fn assemble(input: LinkInput<'_>) -> Snapshot {
             let ka = a.kind != ServiceKind::Process;
             let kb = b.kind != ServiceKind::Process;
             ka.cmp(&kb)
-                .then_with(|| a.first_port().unwrap_or(u16::MAX).cmp(&b.first_port().unwrap_or(u16::MAX)))
+                .then_with(|| {
+                    a.first_port()
+                        .unwrap_or(u16::MAX)
+                        .cmp(&b.first_port().unwrap_or(u16::MAX))
+                })
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
 
         let mut ports: Vec<u16> = services.iter().flat_map(|s| s.ports.clone()).collect();
-        ports.extend(linked_containers.iter().flat_map(|c| c.ports.iter().filter_map(|b| b.host)));
+        ports.extend(
+            linked_containers
+                .iter()
+                .flat_map(|c| c.ports.iter().filter_map(|b| b.host)),
+        );
         ports.sort_unstable();
         ports.dedup();
 
@@ -524,7 +618,11 @@ pub fn assemble(input: LinkInput<'_>) -> Snapshot {
     };
     let mut port_owners: BTreeMap<u16, Vec<ConflictEntry>> = BTreeMap::new();
     for b in &built {
-        for l in input.listeners.iter().filter(|l| Some(l.pid) == b.service.pid) {
+        for l in input
+            .listeners
+            .iter()
+            .filter(|l| Some(l.pid) == b.service.pid)
+        {
             port_owners.entry(l.port).or_default().push(ConflictEntry {
                 pid: l.pid,
                 process: b.service.name.clone(),
@@ -557,7 +655,10 @@ pub fn assemble(input: LinkInput<'_>) -> Snapshot {
                 }
             }
             if owners.len() > 1 {
-                Some(PortConflict { port, entries: owners })
+                Some(PortConflict {
+                    port,
+                    entries: owners,
+                })
             } else {
                 None
             }
@@ -602,7 +703,9 @@ pub fn assemble(input: LinkInput<'_>) -> Snapshot {
 #[allow(unused)]
 fn category_of(key: &str) -> Category {
     match key {
-        "postgres" | "redis" | "mysql" | "mongodb" | "clickhouse" | "memcached" => Category::Database,
+        "postgres" | "redis" | "mysql" | "mongodb" | "clickhouse" | "memcached" => {
+            Category::Database
+        }
         "docker" | "nginx" | "caddy" | "ssh" => Category::Infra,
         _ => Category::Other,
     }
@@ -634,6 +737,8 @@ mod tests {
             mem_bytes: 100 * 1024 * 1024 + 12345,
             run_time_sec: 3600,
             zombie: false,
+            ppid: None,
+            parent_name: None,
         }
     }
 
@@ -691,9 +796,17 @@ mod tests {
         let mut procs = HashMap::new();
         procs.insert(
             100,
-            proc_info(100, "node", "node /u/dev/todayskin/apps/web/node_modules/.bin/vite", "/u/dev/todayskin/apps/web"),
+            proc_info(
+                100,
+                "node",
+                "node /u/dev/todayskin/apps/web/node_modules/.bin/vite",
+                "/u/dev/todayskin/apps/web",
+            ),
         );
-        procs.insert(200, proc_info(200, "rapportd", "/usr/libexec/rapportd", "/"));
+        procs.insert(
+            200,
+            proc_info(200, "rapportd", "/usr/libexec/rapportd", "/"),
+        );
 
         let snap = assemble(LinkInput {
             listeners: &listeners,
@@ -731,7 +844,11 @@ mod tests {
     #[test]
     fn container_links_by_compose_dir_and_conflicts_detected() {
         let proj = base_project("/u/dev/acme", "acme");
-        let mut docker = DockerState { available: true, reason: None, containers: vec![] };
+        let mut docker = DockerState {
+            available: true,
+            reason: None,
+            containers: vec![],
+        };
         docker.containers.push(Container {
             id: "abc".into(),
             name: "acme-dev-postgres".into(),
@@ -739,7 +856,11 @@ mod tests {
             state: "running".into(),
             status_text: "Up 2 hours (healthy)".into(),
             health: Some("healthy".into()),
-            ports: vec![PortBinding { host: Some(5432), container: 5432, proto: "tcp".into() }],
+            ports: vec![PortBinding {
+                host: Some(5432),
+                container: 5432,
+                proto: "tcp".into(),
+            }],
             compose_project: Some("acme".into()),
             compose_service: Some("postgres".into()),
             compose_dir: Some("/u/dev/acme".into()),
@@ -753,7 +874,15 @@ mod tests {
         // local postgres also on 5432 -> conflict with container-published port
         let listeners = vec![listener(300, "postgres", 5432, "127.0.0.1:5432")];
         let mut procs = HashMap::new();
-        procs.insert(300, proc_info(300, "postgres", "/opt/homebrew/bin/postgres", "/opt/homebrew"));
+        procs.insert(
+            300,
+            proc_info(
+                300,
+                "postgres",
+                "/opt/homebrew/bin/postgres",
+                "/opt/homebrew",
+            ),
+        );
 
         let snap = assemble(LinkInput {
             listeners: &listeners,
@@ -776,7 +905,10 @@ mod tests {
         assert_eq!(snap.conflicts[0].port, 5432);
         assert_eq!(snap.conflicts[0].entries.len(), 2);
         // orphan postgres (cwd outside projects)
-        assert!(snap.orphan_services.iter().any(|s| s.framework_key.as_deref() == Some("postgres")));
+        assert!(snap
+            .orphan_services
+            .iter()
+            .any(|s| s.framework_key.as_deref() == Some("postgres")));
     }
 
     #[test]
@@ -798,5 +930,231 @@ mod tests {
             errors: vec![],
         });
         assert!(snap.projects.is_empty());
+    }
+
+    #[test]
+    fn attribution_confidence_levels() {
+        let proj = base_project("/u/dev/todayskin", "todayskin");
+        let listeners = vec![
+            listener(100, "node", 5173, "*:5173"),
+            listener(200, "node", 3000, "*:3000"),
+        ];
+        let mut procs = HashMap::new();
+        // Process with cwd exactly within project subdir -> Medium
+        procs.insert(
+            100,
+            proc_info(
+                100,
+                "node",
+                "node /u/dev/todayskin/apps/web/node_modules/.bin/vite",
+                "/u/dev/todayskin/apps/web",
+            ),
+        );
+        // Process with cwd outside project tree (e.g. /tmp) -> not linked
+        procs.insert(200, proc_info(200, "node", "node server.js", "/tmp"));
+
+        let snap = assemble(LinkInput {
+            listeners: &listeners,
+            procs: &procs,
+            docker: &DockerState::default(),
+            projects: &[proj],
+            git: &HashMap::new(),
+            config: &AppConfig::default(),
+            managed: &[],
+            self_pid: 1,
+            errors: vec![],
+        });
+
+        // The vite process linked to the project with Medium attribution (within project tree)
+        let p = &snap.projects[0];
+        let web = p.services.iter().find(|s| s.name == "web").unwrap();
+        assert_eq!(web.attribution, Some(AttributionLevel::Medium));
+        assert_eq!(
+            web.attribution_reason.as_deref(),
+            Some("cwd within project tree")
+        );
+
+        // The /tmp node process is orphan (not linked to project)
+        let orphan = snap.orphan_services.iter().find(|s| s.pid == Some(200));
+        assert!(orphan.is_some());
+        let orphan = orphan.unwrap();
+        assert_eq!(orphan.attribution, None); // no project attribution
+    }
+
+    #[test]
+    fn managed_process_gets_high_attribution() {
+        let proj = base_project("/u/dev/app", "app");
+        let listeners = vec![];
+        let procs = HashMap::new();
+
+        // Use our own pid/pgid so group_alive returns true
+        let self_pid = std::process::id() as i32;
+        let self_pgid = unsafe { libc::getpgid(0) };
+
+        let managed = vec![ManagedView {
+            id: "m1".into(),
+            pid: self_pid,
+            pgid: self_pgid,
+            name: "dev-server".into(),
+            project_path: Some("/u/dev/app".into()),
+            dir: "/u/dev/app".into(),
+            command: "pnpm run dev".into(),
+            started_ms: 1000,
+        }];
+
+        let snap = assemble(LinkInput {
+            listeners: &listeners,
+            procs: &procs,
+            docker: &DockerState::default(),
+            projects: &[proj],
+            git: &HashMap::new(),
+            config: &AppConfig::default(),
+            managed: &managed,
+            self_pid: 0, // use 0 to not filter ourselves
+            errors: vec![],
+        });
+
+        let p = &snap.projects[0];
+        let svc = p.services.iter().find(|s| s.name == "dev-server").unwrap();
+        assert_eq!(svc.attribution, Some(AttributionLevel::High));
+        assert_eq!(
+            svc.attribution_reason.as_deref(),
+            Some("managed by Dev Cockpit")
+        );
+        assert!(svc.managed);
+    }
+
+    #[test]
+    fn is_http_defaults_to_false_without_framework_detection() {
+        // Regression: previously unwrap_or(service_project.is_some()) caused
+        // any project-linked process without framework detection to be treated
+        // as HTTP. The correct default is TCP (is_http=false).
+        let proj = base_project("/u/dev/myapp", "myapp");
+        let listeners = vec![
+            // Unknown process linked to project (e.g. gradle daemon)
+            listener(100, "java", 8888, "*:8888"),
+            // Known HTTP framework (vite) linked to project
+            listener(200, "node", 5173, "*:5173"),
+        ];
+        let mut procs = HashMap::new();
+        // java process in project tree — no framework detection match
+        procs.insert(
+            100,
+            proc_info(100, "java", "java -jar gradle-daemon.jar", "/u/dev/myapp"),
+        );
+        // node/vite process — framework detected as Frontend (HTTP)
+        procs.insert(
+            200,
+            proc_info(
+                200,
+                "node",
+                "node /u/dev/myapp/apps/web/node_modules/.bin/vite",
+                "/u/dev/myapp/apps/web",
+            ),
+        );
+
+        let snap = assemble(LinkInput {
+            listeners: &listeners,
+            procs: &procs,
+            docker: &DockerState::default(),
+            projects: &[proj],
+            git: &HashMap::new(),
+            config: &AppConfig::default(),
+            managed: &[],
+            self_pid: 1,
+            errors: vec![],
+        });
+
+        let p = &snap.projects[0];
+
+        // java process: Runtime category detected → is_http_category(Runtime) = true
+        // This is correct: the detect module classifies java as Runtime which IS http.
+        // But a process that has NO detection at all should default to false.
+        // Let's test with a truly unknown process name.
+        // Actually java IS detected as Runtime category, which is_http_category returns true for.
+        // The fix only matters for processes where det is None (no detection at all).
+        // The vite process should still be HTTP:
+        let vite_svc = p
+            .services
+            .iter()
+            .find(|s| s.name == "web" && s.kind == ServiceKind::Process)
+            .unwrap();
+        assert!(vite_svc.is_http, "vite (Frontend category) must be HTTP");
+
+        // Now test with a truly undetected process (not in detect::from_process)
+        let proj2 = ProjectStatic {
+            path: "/u/dev/proj2".into(),
+            name: "proj2".into(),
+            package_name: Some("proj2".into()),
+            frameworks: vec![],
+            startables: vec![],
+            compose_file: None,
+            compose_services: vec![],
+            subpackages: vec![],
+            has_git: false,
+        };
+        let listeners2 = vec![listener(300, "myservice", 9999, "*:9999")];
+        let mut procs2 = HashMap::new();
+        // Completely unknown process name — no detection
+        procs2.insert(
+            300,
+            proc_info(300, "myservice", "./myservice --port 9999", "/u/dev/proj2"),
+        );
+
+        let snap2 = assemble(LinkInput {
+            listeners: &listeners2,
+            procs: &procs2,
+            docker: &DockerState::default(),
+            projects: &[proj2],
+            git: &HashMap::new(),
+            config: &AppConfig::default(),
+            managed: &[],
+            self_pid: 1,
+            errors: vec![],
+        });
+
+        let p2 = &snap2.projects[0];
+        let unknown_svc = p2
+            .services
+            .iter()
+            .find(|s| s.kind == ServiceKind::Process)
+            .unwrap();
+        assert!(
+            !unknown_svc.is_http,
+            "undetected process in project must default to TCP (is_http=false)"
+        );
+    }
+
+    #[test]
+    fn known_http_startable_detection_preserved() {
+        // Verify that startable specs with is_http=true still produce HTTP services
+        let proj = base_project("/u/dev/todayskin", "todayskin");
+        let snap = assemble(LinkInput {
+            listeners: &[],
+            procs: &HashMap::new(),
+            docker: &DockerState::default(),
+            projects: &[proj],
+            git: &HashMap::new(),
+            config: &AppConfig::default(),
+            managed: &[],
+            self_pid: 1,
+            errors: vec![],
+        });
+
+        let p = &snap.projects[0];
+        // web startable has is_http: true in base_project fixture
+        let web = p
+            .services
+            .iter()
+            .find(|s| s.name == "web" && s.kind == ServiceKind::Startable)
+            .unwrap();
+        assert!(web.is_http, "startable with is_http=true must stay HTTP");
+
+        let api = p
+            .services
+            .iter()
+            .find(|s| s.name == "api" && s.kind == ServiceKind::Startable)
+            .unwrap();
+        assert!(api.is_http, "startable with is_http=true must stay HTTP");
     }
 }

@@ -63,7 +63,13 @@ impl Notifier {
             let key = service_key(&s.project_path, &s.name, port);
             o.services.insert(
                 key.clone(),
-                SvcSnap { key, name: s.name.clone(), port, project, level: s.health.level },
+                SvcSnap {
+                    key,
+                    name: s.name.clone(),
+                    port,
+                    project,
+                    level: s.health.level,
+                },
             );
         };
         for p in &snapshot.projects {
@@ -116,7 +122,9 @@ impl Notifier {
                 if cur.services.contains_key(key) {
                     continue;
                 }
-                if state.is_suppressed(key) || state.is_suppressed(&service_key(&None, &svc.name, 0)) {
+                if state.is_suppressed(key)
+                    || state.is_suppressed(&service_key(&None, &svc.name, 0))
+                {
                     continue;
                 }
                 let place = svc.project.clone().unwrap_or_else(|| "unlinked".into());
@@ -168,7 +176,8 @@ impl Notifier {
                 }
             }
         }
-        self.health_fails.retain(|k, _| cur.services.contains_key(k));
+        self.health_fails
+            .retain(|k, _| cur.services.contains_key(k));
 
         // --- containers ---
         if cfg.container_stopped {
@@ -226,12 +235,20 @@ impl Notifier {
         // --- docker daemon ---
         if prev.docker_known && prev.docker_ok != cur.docker_ok {
             if cur.docker_ok {
-                fire.push(("docker|up".into(), "Docker is back".into(), "Daemon reachable again".into()));
+                fire.push((
+                    "docker|up".into(),
+                    "Docker is back".into(),
+                    "Daemon reachable again".into(),
+                ));
             } else {
                 fire.push((
                     "docker|down".into(),
                     "Docker unreachable".into(),
-                    snapshot.docker.reason.clone().unwrap_or_else(|| "daemon stopped".into()),
+                    snapshot
+                        .docker
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "daemon stopped".into()),
                 ));
             }
         }
@@ -250,7 +267,8 @@ impl Notifier {
                 send(app, &title, &body);
             }
         }
-        self.cooldowns.retain(|_, last| now.saturating_sub(*last) < 24 * 3600 * 1000);
+        self.cooldowns
+            .retain(|_, last| now.saturating_sub(*last) < 24 * 3600 * 1000);
         self.prev = Some(cur);
     }
 }
@@ -267,12 +285,7 @@ pub fn send(app: &AppHandle, title: &str, body: &str) {
     #[cfg(not(debug_assertions))]
     {
         use tauri_plugin_notification::NotificationExt;
-        let r = app
-            .notification()
-            .builder()
-            .title(title)
-            .body(body)
-            .show();
+        let r = app.notification().builder().title(title).body(body).show();
         if r.is_err() {
             osascript_notify(title, body);
         }

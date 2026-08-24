@@ -144,3 +144,18 @@ export const IconArrowDown = ({ size = 12 }: IconProps = {}) => (
     <path d="M8 3v10M4 9l4 4 4-4" />
   </svg>
 );
+
+export const IconExternalSearch = ({ size = 12 }: IconProps = {}) => (
+  <svg {...base(size)}>
+    <circle cx="6.5" cy="6.5" r="4" />
+    <path d="m10 10 3.5 3.5" />
+    <path d="M5.5 5 7.5 7M7.5 5 5.5 7" strokeWidth={1.2} />
+  </svg>
+);
+
+export const IconBrain = ({ size = 12 }: IconProps = {}) => (
+  <svg {...base(size)}>
+    <path d="M8 14V8.5M6 8.5C4.5 8.5 3 7.5 3 5.5S4.5 2 6 2c.5 0 1 .2 1.5.4M10 8.5c1.5 0 3-1 3-3S11.5 2 10 2c-.5 0-1 .2-1.5.4" />
+    <path d="M5 5.5c0-1 .5-1.8 1.5-2M11 5.5c0-1-.5-1.8-1.5-2" />
+  </svg>
+);

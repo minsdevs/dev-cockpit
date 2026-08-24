@@ -1,18 +1,40 @@
 # 사용 가이드
 
-Dev Cockpit을 설치하고 매일 사용하는 데 필요한 모든 것.
+현재 Dev Cockpit 릴리스 후보를 설치하고 사용하는 방법입니다.
 
 *English version: [USAGE.md](USAGE.md)*
 
-## 설치
+## 1. 배포 경로 선택
 
-### npm으로 설치 (Apple Silicon)
+### 기존 unsigned npm installer (1.0.1)
 
 ```bash
-npx @min0504/dev-cockpit
+npx @min0504/dev-cockpit@1.0.1
 ```
 
-최신 릴리즈를 내려받아 SHA-256 체크섬을 검증하고 `Dev Cockpit.app`을 `/Applications`(쓰기 불가 시 `~/Applications`)에 설치한 뒤 실행합니다. 옵션: `--dir <경로>`로 설치 위치 지정, `--no-open`으로 실행 생략.
+private 루트 소스 package가 아니라 별도로 게시된 installer package를 실행합니다. macOS Apple Silicon과 Node.js 18+를 지원합니다.
+
+1.0.1의 실제 동작:
+
+1. GitHub Releases의 `Dev-Cockpit-1.0.1-macos-aarch64.zip`을 다운로드합니다.
+2. byte를 `install.js`에 고정된 SHA-256과 비교합니다.
+3. `/Applications`, 쓰기 불가 시 `~/Applications`, 또는 `--dir` 위치에 설치합니다.
+4. 압축을 풀기 전에 기존 `Dev Cockpit.app`을 삭제합니다. 공개 installer에는 자동 rollback copy가 없습니다.
+5. `ditto`로 풀고 `com.apple.quarantine`을 제거한 뒤, `--no-open`이 없으면 실행합니다.
+
+```bash
+npx @min0504/dev-cockpit@1.0.1 --help
+npx @min0504/dev-cockpit@1.0.1 --dir "$HOME/Applications" --no-open
+```
+
+중요한 제약:
+
+- artifact는 unsigned이며 공증되지 않았습니다. SHA-256은 installer에 고정된 값과의 무결성을 확인할 뿐 publisher identity를 증명하지 않습니다.
+- quarantine 제거는 기존 개발자용 installer가 명시적으로 사용하는 Gatekeeper 우회입니다.
+- npm에 게시된 1.0.1에는 `--channel`, `--no-preserve`, settings backup, previous-app rollback option이 없습니다.
+- 현재 repository의 RC `installer/install.js`에는 이 option들과 `Dev Cockpit.previous.app`이 추가됐지만 새 npm version으로 재게시되지 않았습니다. channel option도 고정 v1.0.1 URL을 사용합니다. backup path는 legacy `~/.config/dev-cockpit`이고 현재 app data는 `~/Library/Application Support/com.min0504.devcockpit/`에 있어 `.app` 교체로 삭제되지 않습니다.
+
+unsigned 개발자용 배포로만 사용하세요. [SIGNING.md](SIGNING.md)를 참고하세요.
 
 ### 소스에서 빌드
 
@@ -23,136 +45,138 @@ npm install
 npm run tauri build
 ```
 
-번들 생성 위치:
+출력:
 
-```
+```text
 src-tauri/target/release/bundle/macos/Dev Cockpit.app
 ```
 
-`/Applications`로 옮긴 뒤 실행하세요.
+이 명령만으로 Developer ID 서명·공증 artifact가 생성되지는 않습니다.
 
-### 첫 실행
+## 2. 열기와 이동
 
-- **Gatekeeper** — 코드서명이 없는 앱입니다. macOS가 차단하면 앱을 우클릭 → 열기 → 열기.
-- **알림 권한** — 릴리즈 빌드는 최초 1회 알림 권한을 요청합니다. 서버 다운·헬스 실패·포트 충돌 알림을 받으려면 허용하세요.
-- **Launch at Login** — 트레이 메뉴나 설정에서 켜두면 항상 사용할 수 있습니다.
+실행 후 메뉴바 게이지 아이콘이나 `⌃⌥D`를 사용합니다.
 
-실행하면 메뉴바에 게이지 아이콘이 나타납니다. 서비스가 돌고 있으면 아이콘 옆에 개수(실행 중 서비스 + 컨테이너)가 표시되고, 마우스를 올리면 툴팁으로 상세 내역을 보여줍니다.
-
-## 패널
-
-트레이 아이콘 클릭(또는 어디서든 `⌃⌥D`)으로 패널을 엽니다. 트레이 아이콘 아래에 붙어서 열리고, 포커스를 잃으면 자동으로 숨습니다 — 핀을 켜지 않았다면요.
-
-위에서부터:
-
-1. **검색창** — 입력 즉시 전체 필터링.
-2. **충돌 배너** — 같은 포트에 바인드가 겹치는 리스너가 있을 때만 나타납니다. 각 프로세스·PID·프로젝트를 명시하고, 항목마다 stop 버튼이 있습니다.
-3. **프로젝트 카드** — 무언가 실행 중인(또는 직접 펼친) 프로젝트마다 하나. 헤더: 프로젝트명, Git 브랜치, dirty 개수, ahead/behind 화살표, 마지막 커밋. 내부 행: 실행 중 서비스 → 컨테이너 → 시작 가능한(유휴) 서비스 순.
-4. **Other dev processes** — 어느 프로젝트에도 연결하지 못한 개발성 프로세스.
-5. **Docker** — 프로젝트에 연결되지 않은 컨테이너와 데몬 상태.
-6. **Idle projects** — 아무것도 안 돌고 있는 프로젝트들의 접힌 그룹.
-7. **상태바** — 마지막 스캔 시각과 소요 시간, 합계, 일시정지·즉시 스캔 버튼.
-
-### 키보드
-
-| 키 | 동작 |
+| 키/동작 | 결과 |
 | --- | --- |
-| `⌃⌥D` (전역) | 어디서든 패널 토글 |
-| `/` 또는 `⌘F` | 검색창 포커스 |
-| `Esc` | 시트 닫기 → 검색 지우기 → 패널 숨기기 (순서대로) |
+| `⌃⌥D` | 전역 패널 토글 |
+| `/` 또는 `⌘F` | 검색 포커스 |
+| `Esc` | 현재 sheet 닫기 → 검색 지우기 → 패널 숨기기 |
+| Pin | 포커스를 잃어도 패널 유지 |
+| Tray → Pause Monitoring | 주기 스캔 중지 |
+| Tray → Rescan Now | 즉시 스캔과 프로젝트 재발견 |
 
-## 서비스
+패널은 활성/유휴 프로젝트, 귀속되지 않은 개발 프로세스, 연결되지 않은 컨테이너, 선택적으로 일반 listener를 묶어 표시합니다. 포트 충돌은 별도로 표시합니다.
 
-각 서비스 행: 상태 점, 프레임워크 배지, 이름, 포트 배지, CPU, 메모리, 업타임. 행에 마우스를 올리면 액션 버튼이 나타납니다.
+## 3. 서비스와 귀속 안전성
 
-- **상태 점** — 초록: 실행 중/정상 · 노랑: 이상 징후(TCP는 열렸는데 HTTP 실패, 컨테이너 health `starting`) · 빨강: 다운/unhealthy · 빈 원: 미실행.
-- **포트 배지** — HTTP를 말하는 서비스면 클릭 시 `http://localhost:<port>`가 열립니다. 툴팁에 전체 포트 목록.
-- **Stop** — SIGTERM 전송. `⌥`클릭은 SIGKILL. 대상이 자기 프로세스 그룹의 리더라면(예: `npm run dev` 트리) 그룹 전체를 종료해 고아 프로세스가 남지 않습니다. 감지된 개발 서비스만 종료할 수 있고 시스템 프로세스는 보호됩니다.
-- **Start** — 시작 명령이 감지된 유휴 서비스에 나타납니다. 프로젝트의 패키지 매니저(lockfile 기준 `pnpm` / `yarn` / `bun` / `npm`)와 스크립트에서 `dev` → `start:dev` → `serve` → `start` 순으로 선택합니다. Compose 프로젝트는 `docker compose up -d`로 시작. 시작하면 실시간 로그 화면이 열립니다.
-- **시작 명령 편집** — 유휴 서비스에 마우스를 올려 Start가 실행할 명령을 서비스별로 덮어쓸 수 있습니다. 프로젝트 단위로 저장됩니다.
-- **Restart** — 중지 후 재시작. 시작 명령을 아는 경우에만 표시됩니다(앱에서 시작한 서비스는 항상 알고 있음).
-- **로그** — Dev Cockpit에서 시작한 서비스는 stdout/stderr를 실시간으로 스트리밍합니다.
+서비스 행에는 framework/runtime, PID, 포트, CPU, 메모리, uptime, health와 귀속 근거가 표시됩니다.
 
-## 프로젝트
+- **Start:** 서비스 cwd에서 발견된 시작 명령 또는 명시적 프로젝트 override를 실행합니다.
+- **Stop:** SIGTERM, `⌥`-클릭은 SIGKILL을 요청합니다. managed process group은 함께 중지합니다.
+- **Restart:** 시작 명령을 아는 경우 중지 후 다시 시작합니다.
+- **저신뢰 귀속:** PID, 전체 명령, cwd, 부모 정보를 보여 주고 승인을 요청합니다. 시스템·무관 프로세스를 자동으로 안전한 대상으로 간주하지 않습니다.
+- **Health:** 안전한 기본값은 TCP입니다. 확인된 HTTP 서비스나 서비스별 명시 설정에만 HTTP를 사용합니다. method/path/status/interval을 설정할 수 있고 원격 health URL은 거부합니다.
 
-프로젝트 카드는 하나의 저장소/앱 디렉터리에 속한 모든 것을 묶습니다.
+## 4. 프리셋, preflight, dry-run
 
-- **헤더 액션** (hover 시): compose up/down, 브라우저 열기, 터미널 열기, 에디터 열기, Finder에서 보기, 프로젝트 숨기기.
-- **Git 정보** — 브랜치, 미커밋 변경 개수, upstream 대비 ahead/behind, 마지막 커밋 요약과 시점. 기본 20초마다 갱신(설정 가능).
-- **디스커버리** — 설정된 루트 폴더에서 Git 저장소와 매니페스트(`package.json`, `pyproject.toml`, `docker-compose.yml` / `compose.yaml`, `go.mod`, `Cargo.toml`, `Gemfile`, `mix.exs`, …)를 찾아 프로젝트로 인식합니다. 모노레포 워크스페이스(`pnpm-workspace.yaml`, `package.json`의 `workspaces`)를 분석해 서브 패키지별로 시작 가능한 서비스를 만듭니다.
-- **연결(attribution)** — 실행 중인 프로세스는 작업 디렉터리(부모 프로세스 포함)로 프로젝트에 연결됩니다. 하위 폴더에서 `pnpm dev`를 실행해도 올바른 카드에 표시됩니다.
+프로젝트 메뉴에서 **Presets…**를 엽니다.
 
-## Docker
+- 프리셋은 발견된 서비스, 의존 edge와 readiness 조건으로 구성됩니다.
+- **Plan**은 읽기 전용 dry-run입니다. 순차/병렬 group, command, cwd, 예상 포트, readiness와 rollback 순서를 표시합니다.
+- preflight는 첫 실행 파일, cwd, 알려진 포트 충돌, Docker, Compose 파일과 health 설정을 확인합니다.
+- 차단 결과는 **blocked — zero-start**로 표시되며 progress를 만들거나 process/container를 시작하지 않습니다.
+- **Start**는 실행 직전에 preflight를 다시 수행합니다. 의존 group 순서대로 시작하고 readiness 실패 시 뒤 group을 중단한 뒤 소유한 서비스만 rollback합니다.
+- **Stop**은 역순과 정확한 preset ownership을 사용합니다.
+- **Open representative app once after health is ready**는 최대 60초 동안 확인해 한 번만 열며 무한 반복하지 않습니다.
 
-프로젝트에 연결된 컨테이너(compose 작업 디렉터리·라벨 기준)는 프로젝트 카드 안에, 나머지는 Docker 섹션에 표시됩니다.
+Dry-run 자체는 읽기 전용이지만 그 뒤 상태가 바뀔 수 있으므로 Start가 핵심 검사를 반복합니다.
 
-- 행에는 컨테이너/compose 서비스명, 이미지, 호스트 포트, CPU, 메모리, 업타임이 나옵니다.
-- 액션: 로그(실시간 `docker logs -f` tail), restart, stop / start.
-- Compose 프로젝트는 카드에 **compose up / compose down** 버튼 하나로 제어하고, 출력은 로그 화면으로 스트리밍됩니다.
-- Docker 데몬이 꺼져 있으면 Docker 기능만 조용히 비활성화됩니다 — 작은 안내만 표시되고 나머지는 전부 정상 동작합니다.
+## 5. 이전 세션 복구
 
-## 로그 화면
+managed-process 원장 경로:
 
-서비스/컨테이너의 로그 버튼으로 열거나, 무언가를 시작하면 자동으로 열립니다.
-
-- **실시간 스트림** — 최근 2,000줄 유지(줄당 4,000자 제한)로 메모리가 항상 제한됩니다.
-- **필터** — 입력한 문자열이 포함된 줄만 표시, 매치 개수 표시.
-- **일시정지** — 화면을 멈추고 들어오는 줄은 버퍼링; 재개하면 따라잡습니다.
-- **클리어** — 화면 비우기.
-- **Follow** — 화면이 바닥에 붙어 따라갑니다. 위로 스크롤하면 해제, Follow 버튼으로 다시 붙입니다.
-- 화면을 떠나면 로그 세션이 정리됩니다(컨테이너 tail 프로세스 종료). 백그라운드에 아무것도 남지 않습니다.
-
-## 알림
-
-발송 조건: 서비스 예기치 않은 종료 · 컨테이너 중지 · 헬스체크 실패(연속 2회) · 복구 · 새 포트 충돌 · Docker 데몬 끊김/복구.
-
-- 이벤트별 쿨다운(기본 60초, 10초~1시간 설정 가능)으로 반복을 막습니다.
-- 앱 시작 직후와 슬립/웨이크 직후의 스캔은 grace 기간 — 가짜 "종료" 알림이 없습니다.
-- 직접 중지한 것은 알림이 오지 않습니다.
-- 모든 이벤트를 설정에서 개별 on/off 할 수 있습니다.
-
-## 설정
-
-패널 헤더의 톱니 버튼으로 엽니다.
-
-| 설정 | 의미 | 기본값 |
-| --- | --- | --- |
-| Theme | 시스템 / 라이트 / 다크 | 시스템 |
-| Launch at Login | macOS 로그인 항목 | 꺼짐 |
-| Keep window open | 블러 시 숨김 해제(핀) | 꺼짐 |
-| Scan interval | 포트+프로세스 스캔 주기 | 3초 (2/3/5/10) |
-| Docker interval | `docker ps` 주기 | 5초 |
-| HTTP health checks | 로컬 HTTP 포트 프로브 | 켜짐 |
-| Show idle projects | 미실행 프로젝트 표시 | 켜짐 |
-| Show other listeners | 개발 외 프로세스의 열린 포트 표시 | 꺼짐 |
-| Notifications | 마스터 + 이벤트별 토글 + 쿨다운 | 켜짐, 60초 |
-| Project roots | 프로젝트를 찾을 폴더 | `~/Dev`, `~/Developer`, `~/Projects`, `~/Code`, `~/repos`, `~/workspace` 중 존재하는 것 |
-| Projects | 이름 변경, 숨기기/해제, 프로젝트별 override | — |
-
-### 설정 파일
-
-모든 설정은 JSON 파일 하나에 저장되며 직접 편집하거나 백업할 수 있습니다:
-
-```
-~/Library/Application Support/com.min0504.devcockpit/config.json
+```text
+~/Library/Application Support/com.min0504.devcockpit/session-ledger.json
 ```
 
-앱은 자신이 쓴 내용만 반영합니다. 파일을 손으로 고쳤다면 앱을 재시작하세요.
+시작 시 PID, PGID, OS process 시작 시각, command hash, cwd와 프로젝트 관계가 모두 일치해야 재연결합니다.
 
-## 트레이 메뉴
+- **Recovered:** identity가 일치해 managed로 표현할 수 있습니다.
+- **Ended:** 이전 process가 더 이상 없습니다.
+- **Uncertain:** identity 불일치 또는 읽기 실패. 제어를 끄고 읽기 전용으로 둡니다.
+- 어떤 record도 자동 재시작하지 않습니다. 새 앱 instance가 종료된다는 이유만으로 recovered process를 자동 중지하지 않습니다.
+- 이전 stdout/stderr pipe는 복원할 수 없으며 recovered log session에 이 제약을 표시합니다.
 
-트레이 아이콘 우클릭(또는 클릭):
+**Settings → Previous session recovery**에서 확인합니다. 앱 재실행은 자동/process 수준 검증이 있지만 설치된 production 앱 재실행과 실제 reboot는 아직 RC gate입니다.
 
-- **Open Dev Cockpit** (`⌃⌥D`)
-- **Rescan Now** — 즉시 전체 스캔 + 프로젝트 재발견
-- **Pause Monitoring** — 모든 스캔 중지 (체크박스)
-- **Launch at Login** (체크박스)
-- **Quit**
+## 6. 대표 앱 열기
 
-## 제거
+프로젝트 카드의 **App**을 누릅니다.
 
-1. Dev Cockpit 종료 (트레이 메뉴 → Quit).
-2. `Dev Cockpit.app` 삭제.
-3. 원하면 설정도 삭제: `~/Library/Application Support/com.min0504.devcockpit/`.
+선택 순서:
 
-시스템 다른 곳에는 어떤 파일도 만들지 않습니다.
+1. 저장된 프로젝트 기본 대상(현재 후보로 재검증).
+2. `127.0.0.1`의 정상 HTTP 서비스가 정확히 하나.
+3. Android Studio 또는 Xcode 후보가 정확히 하나.
+4. 그 외에는 picker에서 선택하고 필요하면 기본값으로 저장.
+
+지원 대상:
+
+- **Web:** 검증된 loopback URL과 `/docs`, `/admin` 같은 선택적 local path.
+- **Android:** Gradle settings와 `app/src/main/AndroidManifest.xml`이 있을 때만 allowlist의 Android Studio로 프로젝트 root를 엽니다.
+- **iOS:** Xcode로 열며 `.xcworkspace`를 `.xcodeproj`보다 우선합니다.
+
+임의 앱 이름이나 shell command는 받지 않습니다. IDE가 없으면 설치 안내를 표시합니다. backend/API와 loopback launch smoke는 통과했지만 production GUI click-through는 아직 검증 공백입니다.
+
+## 7. 타임라인과 진단
+
+**Project menu → Timeline & diagnostics…**를 선택합니다.
+
+- managed/Docker log line과 service start/stop, health, preset, port conflict event를 합칩니다.
+- service, event kind, 15분/1시간/6시간/24시간으로 필터링합니다.
+- **Preview diagnostic**에서 Markdown 또는 JSON을 로컬 생성합니다.
+- token, password, secret, Authorization/Bearer, cookie의 일반 형태를 preview 전에 마스킹합니다.
+- **Copy**를 누르기 전에는 clipboard에 쓰지 않으며 외부로 업로드하지 않습니다.
+
+상한: structured event 메모리 5,000개, non-blocking disk queue, 5 MiB `timeline.ndjson`을 절반 수준으로 rotation, log session/line 상한. 마스킹은 방어 기능이지 모든 비밀 형태를 보장하지 않으므로 preview를 확인하세요.
+
+## 8. 설정·프리셋 백업/가져오기
+
+**Settings → Settings & preset backup**을 엽니다.
+
+- **Export & copy JSON:** schema version이 있는 global config와 project override를 내보냅니다. preset, health check와 launch default도 포함합니다.
+- PID, log 내용, session ledger와 감지된 secret-like command 값을 제외합니다. query가 있는 legacy health URL도 경고와 함께 제외합니다.
+- **Dry-run import:** 지원하지 않는 future/zero schema와 알 수 없는 nested field를 거부하고 global/project 변경을 added, changed, unchanged, missing, conflict로 나눕니다.
+- 없는 프로젝트와 잘못된 service/preset reference는 선택할 수 없습니다.
+- **Apply selected:** 유효한 선택 항목만 적용하며 먼저 현재 config를 `config.pre-import-<timestamp>.json`으로 복사합니다.
+
+installer의 legacy settings backup과 앱 내부 backup 기능은 서로 다릅니다.
+
+## 9. 로그, Docker, Git, 알림
+
+- Live log는 session별 ring buffer(2,000줄, 줄당 4,000자)를 사용하며 filter, pause/catch-up, clear, copy, follow를 지원합니다.
+- Docker daemon이 있으면 state, health, port, CPU/memory, log, start/stop/restart와 Compose up/down을 제공합니다.
+- Git은 branch, dirty, ahead/behind와 마지막 commit을 표시합니다.
+- 알림은 예상치 못한 service/container 종료, health 실패/복구, 충돌과 Docker 전이를 대상으로 하며 cooldown과 sleep/wake grace가 있습니다.
+
+## 10. 설정 경로와 제거
+
+앱 데이터 디렉터리:
+
+```text
+~/Library/Application Support/com.min0504.devcockpit/
+```
+
+`config.json`, `session-ledger.json`, `timeline.ndjson`, pre-import backup 등이 생길 수 있습니다.
+
+제거:
+
+1. Dev Cockpit을 종료합니다.
+2. `Dev Cockpit.app`과, 있으면 `Dev Cockpit.previous.app`을 삭제합니다.
+3. 원하면 위 Application Support 디렉터리를 삭제합니다.
+4. 구 installer가 만들었다면 `~/.config/dev-cockpit.backup/`과 빈 legacy `~/.config/dev-cockpit/`도 선택적으로 삭제합니다.
+
+## 11. 검증 경계
+
+자동·command/API 검증은 preflight zero-start, process ownership, recovery identity, launch 선택, masking, backup schema 등 핵심 RC logic을 다룹니다. production 앱 GUI 전체 click-through, 설치 앱 relaunch recovery, 실제 reboot, Developer ID 서명/공증/스테이플, 실제 Ed25519 성공/실패 chain, fresh-machine install/rollback은 미검증입니다.

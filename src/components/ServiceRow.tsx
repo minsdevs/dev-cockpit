@@ -11,7 +11,7 @@ import {
 } from "../icons";
 
 export interface ServiceCallbacks {
-  onStop: (pid: number, force?: boolean) => void;
+  onStop: (pid: number, force?: boolean, confirmed?: boolean) => void;
   onStart: (projectPath: string, serviceName: string) => void;
   onRestart: (svc: Service) => void;
   onOpenLogs: (kind: "docker" | "managed", id: string, title: string) => void;
@@ -175,12 +175,34 @@ export function ServiceRow({ svc, now, cb, compact }: Props) {
               <span className="v">{svc.ports.join(", ")}</span>
             </div>
           )}
-          {(svc.health.detail || svc.health.httpStatus != null) && (
+          {(svc.health.detail || svc.health.httpStatus != null || svc.health.checkMethod) && (
             <div className="kv">
               <span className="k">health</span>
               <span className="v">
+                {svc.health.checkMethod && <span className="health-method">[{svc.health.checkMethod}]</span>}
+                {" "}
                 {svc.health.detail ?? (svc.health.tcp === true ? "tcp ok" : "")}
                 {svc.health.httpStatus != null ? ` · HTTP ${svc.health.httpStatus}` : ""}
+                {(svc.health.consecutiveFailures ?? 0) > 2 && (
+                  <span className="health-backoff"> (backoff: {svc.health.consecutiveFailures} failures)</span>
+                )}
+              </span>
+            </div>
+          )}
+          {svc.attribution && (
+            <div className="kv">
+              <span className="k">attribution</span>
+              <span className="v">
+                <span className={`attr-badge attr-${svc.attribution}`}>{svc.attribution}</span>
+                {svc.attributionReason && ` — ${svc.attributionReason}`}
+              </span>
+            </div>
+          )}
+          {svc.parentPid != null && (
+            <div className="kv">
+              <span className="k">parent</span>
+              <span className="v">
+                {svc.parentCommand ?? "unknown"} (pid {svc.parentPid})
               </span>
             </div>
           )}

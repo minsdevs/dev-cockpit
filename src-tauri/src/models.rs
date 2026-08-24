@@ -30,6 +30,56 @@ pub struct Health {
     #[serde(default)]
     pub level: Option<HealthLevel>,
     pub detail: Option<String>,
+    /// Number of consecutive check failures (drives backoff).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub consecutive_failures: u32,
+    /// Protocol actually used: "tcp", "http", "none".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_method: Option<String>,
+}
+
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
+}
+
+/// How confident we are a process belongs to its attributed project.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum AttributionLevel {
+    /// Managed by Dev Cockpit, exact cwd match, or Compose label
+    High,
+    /// cwd within project subtree, parent-child relationship
+    Medium,
+    /// Name-only or indirect/vague match
+    Low,
+}
+
+/// Per-service health check override configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct HealthCheckConfig {
+    /// "auto" (default, uses is_http flag) | "tcp" | "http" | "none"
+    pub method: String,
+    /// URL path for HTTP checks (default "/")
+    pub path: String,
+    /// HTTP method (default "GET")
+    pub http_method: String,
+    /// Expected status codes considered healthy (empty = any non-5xx)
+    pub expected_status: Vec<u16>,
+    /// Check interval override in ms (0 = use global)
+    pub interval_ms: u64,
+}
+
+impl Default for HealthCheckConfig {
+    fn default() -> Self {
+        Self {
+            method: "auto".into(),
+            path: "/".into(),
+            http_method: "GET".into(),
+            expected_status: Vec::new(),
+            interval_ms: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -62,6 +112,18 @@ pub struct Service {
     /// Detected or overridden command used for Start / Restart.
     pub start_command: Option<String>,
     pub is_http: bool,
+    /// Confidence of project attribution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<AttributionLevel>,
+    /// Human-readable reason for attribution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution_reason: Option<String>,
+    /// Parent process ID (for low-trust confirmation context).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_pid: Option<i32>,
+    /// Parent process command name (for low-trust confirmation context).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_command: Option<String>,
 }
 
 impl Service {
@@ -228,6 +290,14 @@ pub struct ProjectOverride {
     /// service name -> start command override
     pub commands: BTreeMap<String, String>,
     pub health_url: Option<String>,
+    /// Per-service health check overrides: service_name -> config
+    pub health_checks: BTreeMap<String, HealthCheckConfig>,
+    /// Development environment presets for orchestrated startup/shutdown.
+    pub presets: Vec<crate::preset::Preset>,
+    /// Validated representative launch target ID.
+    pub default_launch_target: Option<String>,
+    /// Launch target ID -> local URL path such as `/docs`.
+    pub launch_paths: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -251,6 +321,9 @@ pub struct AppConfig {
     pub hidden_projects: Vec<String>,
     pub project_overrides: BTreeMap<String, ProjectOverride>,
     pub pinned: bool,
+    /// "stable" | "beta"
+    pub update_channel: String,
+    pub check_updates: bool,
 }
 
 impl Default for AppConfig {
@@ -272,6 +345,8 @@ impl Default for AppConfig {
             hidden_projects: Vec::new(),
             project_overrides: BTreeMap::new(),
             pinned: false,
+            update_channel: "stable".into(),
+            check_updates: true,
         }
     }
 }

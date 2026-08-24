@@ -1,120 +1,120 @@
 # Feature Catalog
 
-Exact behaviors of every Dev Cockpit feature. For day-to-day operation see [USAGE.md](USAGE.md); for how it's built see [ARCHITECTURE.md](ARCHITECTURE.md).
+Current RC behavior, with implementation status separated from production validation status.
 
-*한국어판: [FEATURES.ko.md](FEATURES.ko.md)*
+*한국어판: [FEATURES.ko.md](FEATURES.ko.md)* · [Usage](USAGE.md) · [Architecture](ARCHITECTURE.md)
 
-## 1. Runtime Detection
+## 1. Discovery, monitoring, and attribution
 
-Every scan tick (default 3 s):
+- Scans listening TCP sockets with `lsof`, targeted process metadata with `sysinfo`, project manifests, Docker CLI output, and Git porcelain/log output.
+- Discovers Git/manifests, Node workspaces, Python scripts, Make `dev|run|start`, Spring Boot `bootRun`, Cargo binaries, and Go `cmd/*` targets conservatively.
+- Combines cwd, process ancestry, managed identity, and Compose labels into project attribution with high/medium/low confidence and a recorded reason.
+- Low-confidence stop requires explicit confirmation; preset stop/rollback requires exact managed ownership.
+- Shows ports, CPU, RSS, uptime, Git state, containers, framework/runtime, health, and conflicts.
 
-1. `lsof -nP -iTCP -sTCP:LISTEN` lists listening TCP sockets (field mode, one pass).
-2. `sysinfo` resolves each owning PID to name, full command line, working directory, CPU %, RSS, start time and the parent chain.
-3. A heuristic engine classifies each process from its command line, cwd and (for containers) image name.
+## 2. Protocol-aware health checks
 
-Collected per service: **port(s) · PID · process name · command · project path · project name · framework · runtime · CPU · memory · uptime · status**.
+- TCP-only is the default and sends no application payload.
+- Automatic HTTP probing is limited to recognized HTTP services; per-service config supports `auto`, `tcp`, `http`, or `none`, local path, HTTP method, expected statuses, and interval.
+- Remote/scheme-relative health paths are rejected.
+- Repeated failures back off; the latest failure detail is exposed.
+- Health and recovery notifications use transition/cooldown safeguards.
 
-### Recognized frameworks & services
+The zero-payload TCP behavior is measured with a real local listener. A real Gradle daemon GUI scenario remains outside the completed production-app validation.
 
-Node ecosystem: Vite, Next.js, React (CRA / react-scripts), Nest.js, Express, Fastify, Koa, Hono, Nuxt, Svelte/SvelteKit, Vue, Angular, Astro, Electron, Tauri, Node, Bun, Deno.
+## 3. Guarded service and Docker control
 
-Python: FastAPI, uvicorn, Django, Flask, Streamlit, generic Python.
+- Starts detected or explicit commands in their cwd and managed process group, with stdout/stderr capture.
+- Stops with SIGTERM or optional SIGKILL and protects unrelated/system processes.
+- Restarts only when a start command is known.
+- Docker container start/stop/restart/logs and Compose up/down are available when Docker is reachable.
+- User-initiated stops are suppressed from unexpected-exit alerts.
 
-Databases & infra: PostgreSQL (`postmaster`, pgvector), Redis (`redis-server`, Valkey), MySQL/MariaDB, MongoDB, ClickHouse, OpenSearch, Meilisearch, memcached, MinIO, RabbitMQ, Kafka (`cp-kafka`), LocalStack, nginx.
+## 4. Presets and read-only preflight
 
-Other runtimes: Go, Java, .NET, PHP, Ruby.
+- Presets save discovered service IDs, dependencies, and readiness (`tcpPort`, health, or immediate).
+- DAG validation rejects missing services, missing dependencies, and cycles.
+- The engine starts topological groups sequentially while allowing independent services in a group to start together.
+- Failed readiness skips later groups and rolls back only processes owned by that project/preset.
+- **Plan** is a dry-run that reports groups, commands, cwd, ports, readiness, rollback order, missing executables/cwd, conflicts, Docker/Compose state, and invalid health settings.
+- The dry-run changes no process, container, or file. Start repeats preflight and guarantees zero-start on a blocking result.
 
-Anything else with a listening port is still shown — either as a generic dev process (when it lives under a project root) or under **Other listeners** (hidden by default).
+## 5. Conservative session recovery
 
-## 2. Project Discovery
+Every managed start records a versioned, atomically written ledger entry with managed ID, PID, PGID, OS start time, command/hash, cwd, project, preset, and timestamp.
 
-- Scans configured root folders (defaults: `~/Dev`, `~/Developer`, `~/Projects`, `~/Code`, `~/repos`, `~/workspace`) with a bounded-depth BFS that skips `node_modules`, `.git` internals, build caches, `Library`, etc.
-- A directory becomes a project when it contains `.git` or a manifest: `package.json`, `pyproject.toml`, `requirements.txt`, `docker-compose.yml` / `docker-compose.yaml` / `compose.yml` / `compose.yaml`, `go.mod`, `Cargo.toml`, `Gemfile`, `mix.exs`.
-- **Monorepos** — `pnpm-workspace.yaml` package globs and `package.json` `workspaces` are expanded; each sub-package contributes its own startable service (e.g. `web`, `api`).
-- **Framework inference from manifests** — dependencies in `package.json` / `pyproject.toml` / `requirements.txt` tag the project (Vite, Next, Nest, FastAPI, …) even when nothing is running.
-- Re-discovery runs every 10 minutes and on demand (tray → Rescan Now, or Settings → rescan).
+At next launch:
 
-## 3. Project-centric View
+- All identity fields must match before reattachment.
+- Dead entries become ended; mismatches become uncertain/read-only.
+- PID reuse alone cannot reattach a process.
+- No automatic restart occurs; recovered groups are only observed for natural exit.
+- Old output pipes cannot be recovered and are not represented as live historical logs.
 
-The link stage joins all data sources into one snapshot:
+## 6. Representative app launch
 
-- Processes attach to projects by working-directory containment, walking up the parent-process chain (a `node` child of `pnpm dev` inherits the project).
-- Containers attach via Docker Compose labels (`com.docker.compose.project.working_dir`) matched against project paths.
-- Each project card shows: Git branch, dirty count, ahead/behind, last commit (summary · author · age), running services, containers, listening ports, compose state.
-- Projects with nothing running are grouped under **Idle projects**; hidden projects (Settings) are excluded everywhere.
+- Candidate set: healthy loopback HTTP services, validated Android project root, and Xcode project/workspace.
+- Saved defaults are revalidated each time.
+- Exactly one healthy web target wins; otherwise a single IDE target can win; ambiguity opens a picker.
+- Web paths must be local absolute paths. Android Studio and Xcode are allowlisted; `.xcworkspace` is preferred.
+- Presets can request one bounded open-after-ready action (5–120 seconds in backend, 60 seconds in current UI).
 
-## 4. One-click Control
+## 7. Project timeline and diagnostic bundle
 
-| Action | Behavior |
-| --- | --- |
-| Start | Spawns the detected start command via the user's login shell, in its own process group, with output captured to a log session. Command resolution: lockfile → package manager (`pnpm-lock.yaml`→pnpm, `yarn.lock`→yarn, `bun.lock(b)`→bun, else npm), script preference `dev` → `start:dev` → `serve` → `start`. Compose projects use `docker compose up -d`. |
-| Stop | SIGTERM; `⌥`-click sends SIGKILL. If the target leads its own process group the whole group is signalled (kills `npm run dev` → `node` trees cleanly). Refuses to signal processes that are not detected dev services. |
-| Restart | Stop, wait for exit, re-start with the known command; failures surface as toasts. |
-| Open | Terminal (configurable app, default Terminal), editor (default Cursor), Finder, browser (`http://localhost:<port>`). URLs are restricted to http/https. |
-| Override | Per-project start-command overrides and display names, editable inline or in Settings, persisted in config. |
+- Merges managed/Docker logs with start/stop, health, preset, and port-conflict events in timestamp order.
+- UI filters by service, kind, and time range.
+- Diagnostics are generated locally as Markdown or JSON and shown before copying.
+- Common secret shapes are masked locally; ANSI/control and event/line lengths are bounded.
+- Structured timeline persistence uses a non-blocking queue and rotates `timeline.ndjson` after 5 MiB. In-memory/event and log-session limits prevent unbounded growth.
 
-User-initiated stops are recorded and suppressed from "service stopped" notifications.
+## 8. Settings and preset backup/import
 
-## 5. Docker Integration
+- Schema v1 JSON includes global configuration and project overrides: commands, health checks, presets, launch defaults/paths, visibility, and notification settings.
+- PID, logs, session ledger, and secret-like commands are excluded. Query-bearing legacy health URLs are excluded with a warning.
+- Import is preview-first and selective. Unknown nested fields and unsupported schema versions fail closed.
+- Missing paths, invalid service references, and invalid preset DAGs are skipped or marked conflict.
+- Apply creates `config.pre-import-<timestamp>.json` before atomically saving the selected result.
 
-- Daemon probe first — when Docker is down, all Docker work is skipped (no error spam) and a note is shown; state changes (down↔up) are notified.
-- `docker ps` every 5 s (configurable): name, image, state, health, port bindings, compose project/service/working-dir labels.
-- `docker stats` on a slower cadence (15 s) fills CPU / memory / limit.
-- Actions: start / stop / restart per container; `docker logs -f` live tail (last 300 lines + follow); compose up/down per project with streamed output.
-- Compose containers are grouped into their project card automatically.
+## 9. Existing core features
 
-## 6. Port Management & Conflicts
+- Project cards, idle projects, global search, Git branch/dirty/ahead/behind/last commit.
+- Docker grouping by Compose labels, resource stats, live logs, and daemon degradation.
+- Address-aware port conflict detection.
+- Bounded logs with filter, pause, clear, copy, and follow.
+- Native/dev notifications with cooldown, startup and sleep/wake grace.
+- Menu-bar count/tooltip, pin, global shortcut, single instance, themes, launch-at-login.
+- External project handoff to dev-finder and localhost-only Code Intelligence route with confirmation.
 
-- Every listening TCP port is tracked with its bind address (`*:5173`, `127.0.0.1:8080`, `[::1]:6379`).
-- **Conflict detection** understands address semantics: two listeners collide when their binds overlap (wildcard `*` overlaps everything on that port; two different loopback addresses do not). IPv4/IPv6 dual binds of one server are not false positives.
-- Conflicts render as a red banner naming each process, PID, project and exact bind, with per-entry stop buttons — and fire a notification when they first appear.
+## 10. Local persistence
 
-## 7. Health Monitoring
+```text
+~/Library/Application Support/com.min0504.devcockpit/
+```
 
-Levels beyond "process exists":
+- `config.json`: application settings and project overrides.
+- `session-ledger.json`: managed recovery identity; never included in settings export.
+- `timeline.ndjson`: bounded/rotated structured timeline.
+- `config.pre-import-*.json`: automatic pre-import backup.
 
-- **TCP probe** — connect to the port (IPv4 then IPv6) with a short timeout.
-- **HTTP probe** — for services that speak HTTP: `GET /` and parse the status line. Any 2xx–4xx response counts as healthy (4xx still means "responding"); a 5xx response marks the service degraded.
-- Container health states (`healthy` / `starting` / `unhealthy`) come from Docker.
-- Resulting levels: `ok` · `warn` (TCP open but HTTP 5xx / container starting) · `down` (port not accepting connections) · `unknown`.
-- A health failure notifies only after **two consecutive** failing probes of a previously-healthy service; recovery notifies once (both toggleable).
+## 11. Updates and distribution security
 
-## 8. macOS Notifications
+- The existing published `@min0504/dev-cockpit@1.0.1` installer is pinned to an unsigned 1.0.1 artifact, verifies SHA-256, removes quarantine, and is a developer distribution path. It supports only `--dir`/`--no-open` and deletes an existing app before replacement.
+- The checked-in RC installer source adds settings backup, previous-app rollback, and channel options but is not the content of the already-published npm 1.0.1 tarball.
+- SHA-256 is integrity, not publisher identity.
+- Current updater code has a placeholder Ed25519 public key and no active crypto verification. It rejects all manifests.
+- Current release workflow requires a signed/notarized app, real manifest signature, and non-placeholder app key before publishing; therefore new releases are blocked until credentials/key/crypto are configured.
+- Apple Developer Program membership applies to formal Developer ID signing/notarization, not npm publication itself.
 
-| Event | Fired when |
-| --- | --- |
-| Service stopped | A tracked service with a port disappears without you stopping it |
-| Container stopped | A running container leaves `running` unexpectedly |
-| Health check failed | Two consecutive failed probes of a previously healthy service |
-| Recovered | A previously alerted-down service becomes healthy |
-| Port conflict | A new overlapping-listener conflict appears |
-| Docker unreachable / back | Daemon state transitions |
+## 12. Validation status and deferred scope
 
-Safeguards: per-event-key cooldown (default 60 s, clamp 10 s–1 h), startup grace (first two ticks), sleep/wake resync grace, suppression of user-initiated stops. Release builds use the native Notification Center; dev builds fall back to `osascript`.
+Passing RC checks cover Rust/frontend tests, typecheck/build, focused process/loopback smoke scenarios, recovery identity, preflight zero-start, masking, and backup schema/application in isolation.
 
-## 9. Logs
+Still unverified:
 
-- Sources: processes started by Dev Cockpit (stdout+stderr) and `docker logs -f` tails.
-- Ring buffer: 2,000 lines per session, 4,000 chars per line — memory-bounded by construction.
-- Lines are batched to the UI over Tauri events; the view supports filter, pause (with catch-up on resume), clear, copy, stderr highlighting and auto-follow.
-- Closing the view tears the session down; container tails are killed. Nothing is written to disk.
+- Full production `.app` GUI click-through.
+- Installed-app relaunch and real reboot recovery.
+- Real Developer ID signing, notarization, stapling, and Gatekeeper acceptance.
+- Real Ed25519 valid/tampered/wrong-key artifact and manifest chain.
+- Fresh-machine install/rollback.
 
-## 10. Search
-
-One query box filters the whole snapshot — project names, paths, ports, PIDs, process names, commands, frameworks, runtimes, container names, images, compose services and Git branches. Matching is case-insensitive substring; sections collapse when empty.
-
-## 11. Always-visible UX
-
-- **Tray icon** with live count of running services + containers; tooltip with services/containers/ports/conflicts breakdown.
-- **Popover panel** (460×640) anchored under the tray icon, clamped to the tray's monitor, above normal windows, hidden from the Dock and app switcher.
-- Hide-on-blur by default; **pin** keeps it open. `⌃⌥D` toggles from anywhere (global shortcut).
-- **Single instance** — relaunching focuses the existing instance instead of duplicating it.
-- Dark / light theme following the system (or forced).
-- UI re-renders only when a scan actually changed something.
-
-## 12. Reliability & Performance
-
-- Every external command (`lsof`, `docker`, `git`, spawned dev servers) runs with a timeout; one failing collector degrades gracefully instead of crashing the app (errors surface in the status bar).
-- Sleep/wake detection: a stalled scheduler triggers a resync cycle that never produces false "stopped" alerts.
-- Interval separation (ports 3 s / docker 5 s / stats 15 s / git 20 s / discovery 10 m) keeps steady-state CPU under ~1 %.
-- Snapshot diffing means zero UI work when nothing changed; log buffers and per-session caps bound memory.
+Project-level memory trends and overload alerts remain deferred until whole-feature overhead and repeated user need are demonstrated.

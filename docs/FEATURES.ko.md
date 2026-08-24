@@ -1,120 +1,120 @@
 # 기능 카탈로그
 
-Dev Cockpit 모든 기능의 정확한 동작 정의. 일상적인 사용법은 [USAGE.ko.md](USAGE.ko.md), 내부 구조는 [ARCHITECTURE.ko.md](ARCHITECTURE.ko.md) 참고.
+현재 RC 동작을 설명하며 구현 상태와 production 검증 상태를 구분합니다.
 
-*English version: [FEATURES.md](FEATURES.md)*
+*English version: [FEATURES.md](FEATURES.md)* · [사용법](USAGE.ko.md) · [아키텍처](ARCHITECTURE.ko.md)
 
-## 1. 런타임 감지
+## 1. 발견, 모니터링, 귀속
 
-매 스캔 틱(기본 3초)마다:
+- `lsof` TCP listener, `sysinfo` 대상 process metadata, project manifest, Docker CLI, Git porcelain/log를 수집합니다.
+- Git/manifest, Node workspace, Python script, Make `dev|run|start`, Spring Boot `bootRun`, Cargo binary와 Go `cmd/*` target을 보수적으로 발견합니다.
+- cwd, process ancestry, managed identity와 Compose label을 결합해 high/medium/low 귀속 신뢰도와 근거를 기록합니다.
+- 저신뢰 stop은 명시 승인이 필요하고 preset stop/rollback은 정확한 managed ownership을 요구합니다.
+- 포트, CPU, RSS, uptime, Git, container, framework/runtime, health와 충돌을 표시합니다.
 
-1. `lsof -nP -iTCP -sTCP:LISTEN`으로 리스닝 중인 TCP 소켓을 나열합니다(field 모드, 1회 실행).
-2. `sysinfo`로 소유 PID마다 이름, 전체 커맨드라인, 작업 디렉터리, CPU %, RSS, 시작 시각, 부모 체인을 확인합니다.
-3. 휴리스틱 엔진이 커맨드라인·cwd·(컨테이너는) 이미지명으로 각 프로세스를 분류합니다.
+## 2. 프로토콜 인식 health check
 
-서비스별 수집 항목: **포트 · PID · 프로세스명 · 커맨드 · 프로젝트 경로 · 프로젝트명 · 프레임워크 · 런타임 · CPU · 메모리 · 업타임 · 상태**.
+- 기본값은 application payload를 보내지 않는 TCP-only입니다.
+- 자동 HTTP probe는 확인된 HTTP 서비스로 제한합니다. 서비스별 `auto`, `tcp`, `http`, `none`, local path, method, expected status와 interval을 지원합니다.
+- 원격·scheme-relative health path는 거부합니다.
+- 반복 실패는 backoff하고 마지막 실패 detail을 노출합니다.
+- Health와 복구 알림은 transition/cooldown 안전장치를 사용합니다.
 
-### 인식하는 프레임워크·서비스
+실제 local listener로 TCP payload 0바이트를 측정했습니다. 실제 Gradle daemon을 포함한 production 앱 GUI scenario는 완료된 검증 범위 밖입니다.
 
-Node 생태계: Vite, Next.js, React (CRA / react-scripts), Nest.js, Express, Fastify, Koa, Hono, Nuxt, Svelte/SvelteKit, Vue, Angular, Astro, Electron, Tauri, Node, Bun, Deno.
+## 3. 보호된 서비스·Docker 제어
 
-Python: FastAPI, uvicorn, Django, Flask, Streamlit, 일반 Python.
+- 발견되거나 명시적으로 설정한 command를 cwd와 managed process group에서 실행하고 stdout/stderr를 수집합니다.
+- SIGTERM과 선택적 SIGKILL을 사용하며 무관/system process를 보호합니다.
+- 시작 command를 아는 경우만 restart합니다.
+- Docker가 도달 가능하면 container start/stop/restart/log와 Compose up/down을 제공합니다.
+- 사용자 중지는 unexpected-exit 알림에서 제외합니다.
 
-데이터베이스·인프라: PostgreSQL(`postmaster`, pgvector), Redis(`redis-server`, Valkey), MySQL/MariaDB, MongoDB, ClickHouse, OpenSearch, Meilisearch, memcached, MinIO, RabbitMQ, Kafka(`cp-kafka`), LocalStack, nginx.
+## 4. 프리셋과 읽기 전용 preflight
 
-기타 런타임: Go, Java, .NET, PHP, Ruby.
+- 프리셋은 발견된 service ID, dependency와 readiness(`tcpPort`, health, immediate)를 저장합니다.
+- DAG 검증은 없는 service/dependency와 cycle을 거부합니다.
+- topological group을 순서대로 실행하고 group 안 독립 service는 함께 시작할 수 있습니다.
+- readiness 실패 시 뒤 group을 건너뛰고 해당 project/preset 소유 process만 rollback합니다.
+- **Plan** dry-run은 group, command, cwd, port, readiness, rollback 순서, 없는 executable/cwd, conflict, Docker/Compose와 잘못된 health 설정을 보고합니다.
+- dry-run은 process, container, file을 바꾸지 않습니다. Start가 preflight를 반복하며 차단 결과에서 zero-start를 보장합니다.
 
-그 외에도 포트를 열고 있으면 전부 표시됩니다 — 프로젝트 루트 아래에 있으면 일반 개발 프로세스로, 아니면 **Other listeners**(기본 숨김)로.
+## 5. 보수적 세션 복구
 
-## 2. 프로젝트 디스커버리
+모든 managed start는 managed ID, PID, PGID, OS start time, command/hash, cwd, project, preset과 timestamp를 version 원장에 atomic write합니다.
 
-- 설정된 루트 폴더(기본: `~/Dev`, `~/Developer`, `~/Projects`, `~/Code`, `~/repos`, `~/workspace`)를 깊이 제한 BFS로 스캔하며 `node_modules`, `.git` 내부, 빌드 캐시, `Library` 등은 건너뜁니다.
-- `.git` 또는 매니페스트가 있으면 프로젝트로 인식: `package.json`, `pyproject.toml`, `requirements.txt`, `docker-compose.yml` / `docker-compose.yaml` / `compose.yml` / `compose.yaml`, `go.mod`, `Cargo.toml`, `Gemfile`, `mix.exs`.
-- **모노레포** — `pnpm-workspace.yaml`의 패키지 glob과 `package.json`의 `workspaces`를 확장해, 서브 패키지마다 자체 시작 가능 서비스를 만듭니다(예: `web`, `api`).
-- **매니페스트 기반 프레임워크 추론** — `package.json` / `pyproject.toml` / `requirements.txt`의 의존성으로 아무것도 실행 중이 아니어도 프로젝트에 태그를 붙입니다(Vite, Next, Nest, FastAPI, …).
-- 재발견은 10분마다, 그리고 요청 시(트레이 → Rescan Now, 설정 → rescan) 실행됩니다.
+다음 실행에서:
 
-## 3. 프로젝트 중심 뷰
+- 모든 identity field가 일치해야 재연결합니다.
+- 종료 항목은 ended, 불일치는 uncertain/read-only가 됩니다.
+- PID만 재사용된 process는 재연결할 수 없습니다.
+- 자동 restart하지 않으며 recovered group의 자연 종료만 관찰합니다.
+- 이전 output pipe를 복원할 수 없고 과거 live log로 가장하지 않습니다.
 
-링크 단계가 모든 데이터 소스를 하나의 스냅샷으로 결합합니다:
+## 6. 대표 앱 실행
 
-- 프로세스는 작업 디렉터리 포함 관계로 프로젝트에 연결되며, 부모 프로세스 체인을 거슬러 올라갑니다(`pnpm dev`의 자식 `node`는 프로젝트를 물려받음).
-- 컨테이너는 Docker Compose 라벨(`com.docker.compose.project.working_dir`)을 프로젝트 경로와 매칭해 연결합니다.
-- 각 프로젝트 카드에 표시: Git 브랜치, dirty 개수, ahead/behind, 마지막 커밋(요약 · 작성자 · 시점), 실행 중 서비스, 컨테이너, 리스닝 포트, compose 상태.
-- 아무것도 실행하지 않는 프로젝트는 **Idle projects**로 묶이고, 숨긴 프로젝트(설정)는 모든 곳에서 제외됩니다.
+- 후보: 정상 loopback HTTP service, 검증된 Android project root, Xcode project/workspace.
+- 저장된 default를 매번 재검증합니다.
+- 정상 web target이 정확히 하나면 선택하고, 없을 때 IDE target이 하나면 선택하며 모호하면 picker를 엽니다.
+- Web path는 local absolute path여야 합니다. Android Studio와 Xcode만 allowlist에 있고 `.xcworkspace`를 우선합니다.
+- preset은 상한이 있는 open-after-ready를 한 번 요청할 수 있습니다(backend 5~120초, 현재 UI 60초).
 
-## 4. 원클릭 컨트롤
+## 7. 프로젝트 타임라인과 진단 묶음
 
-| 액션 | 동작 |
-| --- | --- |
-| Start | 감지된 시작 명령을 사용자의 로그인 셸로, 독립 프로세스 그룹에서 실행하고 출력을 로그 세션으로 캡처. 명령 결정: lockfile → 패키지 매니저(`pnpm-lock.yaml`→pnpm, `yarn.lock`→yarn, `bun.lock(b)`→bun, 그 외 npm), 스크립트 우선순위 `dev` → `start:dev` → `serve` → `start`. Compose 프로젝트는 `docker compose up -d`. |
-| Stop | SIGTERM; `⌥`클릭은 SIGKILL. 대상이 자기 프로세스 그룹의 리더면 그룹 전체에 시그널(`npm run dev` → `node` 트리를 깔끔히 종료). 감지된 개발 서비스가 아닌 프로세스에는 시그널을 거부. |
-| Restart | 중지 → 종료 대기 → 알고 있는 명령으로 재시작; 실패는 토스트로 표시. |
-| Open | 터미널(설정 가능, 기본 Terminal), 에디터(기본 Cursor), Finder, 브라우저(`http://localhost:<port>`). URL은 http/https만 허용. |
-| Override | 프로젝트별 시작 명령 덮어쓰기와 표시 이름. 인라인 또는 설정에서 편집, config에 저장. |
+- managed/Docker log와 start/stop, health, preset, port conflict event를 timestamp 순서로 합칩니다.
+- UI는 service, kind, 시간 범위로 필터링합니다.
+- 진단은 로컬에서 Markdown/JSON으로 만들고 복사 전에 보여 줍니다.
+- 일반적인 secret 형태를 로컬에서 마스킹하고 ANSI/control과 event/line 길이를 제한합니다.
+- structured timeline은 non-blocking queue로 저장하고 `timeline.ndjson`이 5 MiB를 넘으면 rotation합니다. event/log session 상한으로 무제한 증가를 막습니다.
 
-사용자가 직접 중지한 것은 기록되어 "service stopped" 알림에서 제외됩니다.
+## 8. 설정·프리셋 백업/가져오기
 
-## 5. Docker 통합
+- Schema v1 JSON은 global config와 command, health, preset, launch default/path, 표시·알림 설정을 포함한 project override를 담습니다.
+- PID, log, session ledger, secret-like command는 제외합니다. query가 있는 legacy health URL도 경고와 함께 제외합니다.
+- Import는 preview 우선·선택 적용입니다. 알 수 없는 nested field와 지원하지 않는 schema는 fail-closed입니다.
+- 없는 path, 잘못된 service reference와 preset DAG는 skip 또는 conflict 처리합니다.
+- Apply는 선택 결과를 atomic save하기 전에 `config.pre-import-<timestamp>.json`을 생성합니다.
 
-- 데몬 프로브 먼저 — Docker가 꺼져 있으면 모든 Docker 작업을 건너뛰고(에러 스팸 없음) 안내만 표시하며, 상태 전이(down↔up)는 알림으로 전달됩니다.
-- `docker ps`를 5초마다(설정 가능): 이름, 이미지, 상태, health, 포트 바인딩, compose 프로젝트/서비스/작업 디렉터리 라벨.
-- `docker stats`는 더 느린 주기(15초)로 CPU / 메모리 / limit을 채웁니다.
-- 액션: 컨테이너별 start / stop / restart; `docker logs -f` 실시간 tail(최근 300줄 + follow); 프로젝트별 compose up/down과 스트리밍 출력.
-- Compose 컨테이너는 자동으로 해당 프로젝트 카드로 묶입니다.
+## 9. 기존 핵심 기능
 
-## 6. 포트 관리·충돌
+- 프로젝트 카드, idle project, 전체 검색, Git branch/dirty/ahead/behind/last commit.
+- Compose label 기반 Docker grouping, resource stat, live log와 daemon 장애 격리.
+- 주소 의미를 반영한 port conflict 감지.
+- 상한 있는 log filter, pause, clear, copy, follow.
+- cooldown, startup·sleep/wake grace가 있는 native/dev 알림.
+- 메뉴바 count/tooltip, pin, global shortcut, single instance, theme, launch-at-login.
+- 승인 후 dev-finder와 localhost-only Code Intelligence 경로로 project 전달.
 
-- 리스닝 중인 모든 TCP 포트를 바인드 주소와 함께 추적합니다(`*:5173`, `127.0.0.1:8080`, `[::1]:6379`).
-- **충돌 감지**는 주소 의미론을 이해합니다: 바인드가 겹칠 때만 충돌(와일드카드 `*`는 그 포트의 모든 주소와 겹침; 서로 다른 루프백 주소끼리는 겹치지 않음). 한 서버의 IPv4/IPv6 이중 바인드는 오탐이 아닙니다.
-- 충돌은 각 프로세스·PID·프로젝트·정확한 바인드를 명시한 빨간 배너로 표시되고 항목별 stop 버튼이 있으며, 처음 나타날 때 알림이 발송됩니다.
+## 10. 로컬 저장
 
-## 7. 헬스 모니터링
+```text
+~/Library/Application Support/com.min0504.devcockpit/
+```
 
-"프로세스 존재" 그 이상의 단계:
+- `config.json`: 앱 설정과 project override.
+- `session-ledger.json`: managed recovery identity. 설정 export에 포함하지 않습니다.
+- `timeline.ndjson`: 상한·rotation이 있는 structured timeline.
+- `config.pre-import-*.json`: 자동 import 이전 backup.
 
-- **TCP 프로브** — 짧은 타임아웃으로 포트에 연결(IPv4 후 IPv6).
-- **HTTP 프로브** — HTTP를 말하는 서비스에 `GET /` 후 상태 라인 파싱. 2xx–4xx 응답은 정상으로 간주(4xx도 "응답함"의 의미); 5xx 응답은 degraded로 표시.
-- 컨테이너 health 상태(`healthy` / `starting` / `unhealthy`)는 Docker에서 가져옵니다.
-- 결과 단계: `ok` · `warn`(TCP는 열렸는데 HTTP 5xx / 컨테이너 starting) · `down`(포트가 연결을 받지 않음) · `unknown`.
-- 헬스 실패 알림은 정상이던 서비스가 **연속 2회** 프로브에 실패했을 때만 발송되고, 복구는 1회 알림(둘 다 토글 가능).
+## 11. 업데이트·배포 보안
 
-## 8. macOS 알림
+- 기존 게시된 `@min0504/dev-cockpit@1.0.1` installer는 unsigned 1.0.1 artifact에 고정되어 SHA-256을 확인하고 quarantine을 제거하는 개발자용 배포입니다. `--dir`/`--no-open`만 지원하고 기존 앱을 삭제 후 교체합니다.
+- 현재 RC installer source는 settings backup, previous-app rollback과 channel option을 추가했지만 이미 게시된 npm 1.0.1 tarball의 내용은 아닙니다.
+- SHA-256은 무결성이지 publisher identity가 아닙니다.
+- 현재 updater는 placeholder Ed25519 public key이며 실제 crypto verification이 없습니다. 모든 manifest를 거부합니다.
+- 현재 release workflow는 게시 전에 signed/notarized app, 실제 manifest signature와 non-placeholder app key를 요구하므로 credentials/key/crypto 구성 전 새 release를 차단합니다.
+- Apple Developer Program은 정식 Developer ID 서명/공증의 요구사항이며 npm 게시 자체의 요구사항이 아닙니다.
 
-| 이벤트 | 발송 조건 |
-| --- | --- |
-| Service stopped | 포트를 가진 추적 서비스가 사용자 조작 없이 사라짐 |
-| Container stopped | 실행 중이던 컨테이너가 예기치 않게 `running`을 벗어남 |
-| Health check failed | 정상이던 서비스가 연속 2회 프로브 실패 |
-| Recovered | 다운 알림이 나갔던 서비스가 다시 정상화 |
-| Port conflict | 새 리스너 겹침 충돌 발생 |
-| Docker unreachable / back | 데몬 상태 전이 |
+## 12. 검증 상태와 보류 범위
 
-안전장치: 이벤트 키별 쿨다운(기본 60초, 10초~1시간 범위), 시작 grace(처음 두 틱), 슬립/웨이크 재동기화 grace, 사용자 중지 억제. 릴리즈 빌드는 네이티브 알림 센터, 개발 빌드는 `osascript`로 대체.
+통과한 RC 검증은 Rust/frontend test, typecheck/build, 집중 process/loopback smoke, recovery identity, preflight zero-start, masking, 격리 backup schema/application을 포함합니다.
 
-## 9. 로그
+미검증:
 
-- 소스: Dev Cockpit이 시작한 프로세스(stdout+stderr)와 `docker logs -f` tail.
-- 링 버퍼: 세션당 2,000줄, 줄당 4,000자 — 구조적으로 메모리가 제한됩니다.
-- 줄은 Tauri 이벤트로 배치 전송되며, 뷰는 필터, 일시정지(재개 시 따라잡기), 클리어, 복사, stderr 강조, 자동 follow를 지원합니다.
-- 뷰를 닫으면 세션이 정리되고 컨테이너 tail이 종료됩니다. 디스크에는 아무것도 기록하지 않습니다.
+- production `.app` GUI 전체 click-through.
+- 설치 앱 relaunch와 실제 reboot recovery.
+- 실제 Developer ID 서명, 공증, stapling, Gatekeeper 허용.
+- 실제 Ed25519 정상/변조/wrong-key artifact·manifest chain.
+- fresh-machine install/rollback.
 
-## 10. 검색
-
-검색창 하나로 스냅샷 전체를 필터링합니다 — 프로젝트명, 경로, 포트, PID, 프로세스명, 커맨드, 프레임워크, 런타임, 컨테이너명, 이미지, compose 서비스, Git 브랜치. 대소문자 무시 부분 문자열 매칭이며, 비어 있는 섹션은 접힙니다.
-
-## 11. 상시 표시 UX
-
-- **트레이 아이콘**에 실행 중 서비스+컨테이너 개수를 실시간 표시; 툴팁에 서비스/컨테이너/포트/충돌 내역.
-- **팝오버 패널**(460×640)은 트레이 아이콘 아래에 고정되고 트레이가 있는 모니터 안으로 클램프되며, 일반 창 위에 뜨고 Dock·앱 전환기에는 나타나지 않습니다.
-- 기본은 블러 시 숨김; **핀**으로 유지. `⌃⌥D`로 어디서든 토글(전역 단축키).
-- **단일 인스턴스** — 재실행하면 복제 대신 기존 인스턴스가 포커스됩니다.
-- 시스템을 따르는(또는 고정 가능한) 다크/라이트 테마.
-- 스캔 결과가 실제로 바뀌었을 때만 UI를 다시 렌더링합니다.
-
-## 12. 안정성·성능
-
-- 모든 외부 명령(`lsof`, `docker`, `git`, 실행한 개발 서버)은 타임아웃과 함께 실행됩니다; 수집기 하나가 실패해도 앱이 죽지 않고 우아하게 성능이 저하됩니다(에러는 상태바에 표시).
-- 슬립/웨이크 감지: 스케줄러가 멈췄다 깨어나면 재동기화 사이클이 실행되어 가짜 "stopped" 알림이 절대 발생하지 않습니다.
-- 주기 분리(포트 3초 / docker 5초 / stats 15초 / git 20초 / 디스커버리 10분)로 평상시 CPU를 ~1% 미만으로 유지합니다.
-- 스냅샷 diff로 변화가 없으면 UI 작업이 0이며, 로그 버퍼와 세션별 상한으로 메모리를 제한합니다.
+프로젝트별 메모리 추세와 과부하 알림은 전체 기능 비용과 반복 사용자 필요가 확인될 때까지 보류합니다.
