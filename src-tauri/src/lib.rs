@@ -18,6 +18,7 @@ pub mod session;
 pub mod state;
 pub mod timeline;
 pub mod tools;
+pub mod update_recovery;
 pub mod updater;
 pub mod util;
 
@@ -104,6 +105,9 @@ pub fn run() {
                 .build(),
         )
         .manage(AppState::new(app_config))
+        .manage(update_recovery::RecoveryStatus(std::sync::Mutex::new(
+            "recovering".into(),
+        )))
         .invoke_handler(tauri::generate_handler![
             commands::get_snapshot,
             commands::force_scan,
@@ -143,11 +147,26 @@ pub fn run() {
             commands::preview_settings_import,
             commands::apply_settings_import,
             commands::check_for_update,
+            commands::get_install_recovery,
             commands::launch_dev_finder,
             commands::get_dev_finder_command,
             commands::open_code_intelligence,
         ])
         .setup(|app| {
+            let recovery_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let result = tauri::async_runtime::spawn_blocking(update_recovery::recover_current)
+                    .await
+                    .unwrap_or_else(|_| Err("state_invalid".into()));
+                let status = result.unwrap_or_else(|code| code);
+                if let Ok(mut value) = recovery_app
+                    .state::<update_recovery::RecoveryStatus>()
+                    .0
+                    .lock()
+                {
+                    *value = status;
+                }
+            });
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 

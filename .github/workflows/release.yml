@@ -19,6 +19,8 @@ on:
 env:
   APP_NAME: "Dev Cockpit"
   BUNDLE_ID: "com.min0504.devcockpit"
+  RELEASE_VERSION: ${{ inputs.version }}
+  RELEASE_CHANNEL: ${{ inputs.channel }}
 
 jobs:
   build-and-release:
@@ -33,7 +35,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           cache: 'npm'
 
       - name: Setup Rust
@@ -53,14 +55,18 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build frontend
-        run: npm run build
+      - name: Validate and test
+        run: |
+          [[ "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$ ]]
+          npm test
+          npm run typecheck
+          cd src-tauri
+          cargo fmt --all -- --check
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test --all-targets --all-features
 
       - name: Build Tauri app
-        run: |
-          cd src-tauri
-          cargo build --release
-          cd ..
+        run: npm run tauri build -- --bundles app
 
       - name: Bundle app
         run: |
@@ -94,34 +100,20 @@ jobs:
 
       - name: Create distribution ZIP
         run: |
-          VERSION="${{ inputs.version }}"
+          VERSION="$RELEASE_VERSION"
           ZIP_NAME="Dev-Cockpit-${VERSION}-macos-aarch64.zip"
-          ditto -c -k --keepParent "$APP_PATH" "$ZIP_NAME"
+          ditto -c -k --norsrc --keepParent "$APP_PATH" "$ZIP_NAME"
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
 
           # Compute SHA-256
           SHA=$(shasum -a 256 "$ZIP_NAME" | cut -d' ' -f1)
           echo "SHA256=$SHA" >> $GITHUB_ENV
 
-      - name: Generate update manifest
-        run: |
-          VERSION="${{ inputs.version }}"
-          CHANNEL="${{ inputs.channel }}"
-          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/v${VERSION}/${ZIP_NAME}"
-
-          cat > update-manifest.json <<EOF
-          {
-            "version": "${VERSION}",
-            "channel": "${CHANNEL}",
-            "sha256": "${SHA256}",
-            "downloadUrl": "${DOWNLOAD_URL}",
-            "releaseNotes": "Release ${VERSION} (${CHANNEL})",
-            "publishedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "signature": "PLACEHOLDER_SIGN_WITH_ED25519_KEY"
-          }
-          EOF
-
-          echo "🟡 Manifest signature is a placeholder — sign with ed25519 key in production"
+      - name: Generate signed update manifest
+        env:
+          UPDATE_SIGNING_KEY_PEM: ${{ secrets.UPDATE_SIGNING_KEY_PEM }}
+          UPDATE_KEY_ID: ${{ vars.UPDATE_KEY_ID }}
+        run: node scripts/update-manifest.cjs create "$APP_PATH" "$ZIP_NAME" > update-manifest.json
 
       - name: Enforce release gates before publishing
         run: |
@@ -129,22 +121,7 @@ jobs:
             echo "::error::Release publishing requires a signed and notarized app."
             exit 1
           fi
-          if grep -q '"signature": "PLACEHOLDER_' update-manifest.json; then
-            echo "::error::Release publishing requires a real Ed25519 manifest signature."
-            exit 1
-          fi
-          if grep -q 'const UPDATE_PUBLIC_KEY: &str = "PLACEHOLDER_' src-tauri/src/updater.rs; then
-            echo "::error::Release publishing requires the matching Ed25519 public key in the app."
-            exit 1
-          fi
-
-      # ---------------------------------------------------------------
-      # 🟡 TODO: Sign the update manifest with ed25519 private key
-      # In production, use a step like:
-      #   echo -n "$(cat update-manifest-unsigned.json)" | \
-      #     openssl pkeyutl -sign -inkey ed25519_private.pem | base64
-      # Then inject the signature into the manifest.
-      # ---------------------------------------------------------------
+          node scripts/update-manifest.cjs verify update-manifest.json "$ZIP_NAME" "$APP_PATH"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -164,6 +141,14 @@ jobs:
             **SHA-256:** `${{ env.SHA256 }}`
 
             ${{ env.SIGNED == 'false' && '⚠️ This release is NOT code-signed. See docs/SIGNING.md for details.' || '✅ Code-signed and notarized.' }}
+
+      - name: Publish beta manifest pointer
+        if: inputs.channel == 'beta'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view beta >/dev/null 2>&1 || gh release create beta --prerelease --title "Beta update channel" --target "$GITHUB_SHA"
+          gh release upload beta update-manifest.json --clobber
 
       - name: Verify release integrity
         run: |

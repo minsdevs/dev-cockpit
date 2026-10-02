@@ -68,6 +68,7 @@ export const ipc = {
     invoke<AppConfig>("apply_settings_import", { json, selected }),
   // Updater
   checkForUpdate: () => invoke<UpdateInfo | null>("check_for_update"),
+  getInstallRecovery: () => invoke<string>("get_install_recovery"),
   // External tools
   launchDevFinder: (projectPath: string) =>
     invoke<ToolLaunchResult>("launch_dev_finder", { projectPath }),

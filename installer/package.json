@@ -1,12 +1,15 @@
 {
   "name": "@min0504/dev-cockpit",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Installer for Dev Cockpit — an always-visible macOS menu bar dashboard for your local dev environment (ports, processes, projects, Docker, Git, health checks, one-click control)",
   "bin": {
     "dev-cockpit": "install.js"
   },
   "files": [
-    "install.js"
+    "install.js",
+    "manifest.js",
+    "transaction.js",
+    "trusted-keys.json"
   ],
   "os": [
     "darwin"
@@ -16,11 +19,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Min0504/dev-cockpit.git",
+    "url": "git+https://github.com/minsdevs/dev-cockpit.git",
     "directory": "installer"
   },
-  "homepage": "https://github.com/Min0504/dev-cockpit",
-  "bugs": "https://github.com/Min0504/dev-cockpit/issues",
+  "homepage": "https://github.com/minsdevs/dev-cockpit",
+  "bugs": "https://github.com/minsdevs/dev-cockpit/issues",
   "license": "MIT",
   "keywords": [
     "macos",

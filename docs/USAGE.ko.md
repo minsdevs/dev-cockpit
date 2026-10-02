@@ -39,7 +39,7 @@ unsigned 개발자용 배포로만 사용하세요. [SIGNING.md](SIGNING.md)를 
 ### 소스에서 빌드
 
 ```bash
-git clone https://github.com/Min0504/dev-cockpit.git
+git clone https://github.com/minsdevs/dev-cockpit.git
 cd dev-cockpit
 npm install
 npm run tauri build

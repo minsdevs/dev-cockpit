@@ -444,6 +444,17 @@ pub async fn check_for_update(
     crate::updater::check_update(&config.update_channel).await
 }
 
+#[tauri::command]
+pub fn get_install_recovery(
+    state: State<'_, crate::update_recovery::RecoveryStatus>,
+) -> Result<String, String> {
+    state
+        .0
+        .lock()
+        .map(|status| status.clone())
+        .map_err(|_| "state_invalid".into())
+}
+
 // ---------------------------------------------------------------------------
 // external tools
 // ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { ipc } from "../ipc";
 import type { AppConfig, RecoveryRecord } from "../types";
 import { BackupPanel } from "./BackupPanel";
+import { UpdatePanel } from "./UpdatePanel";
 import { basename, tildify } from "../utils";
 import { IconX } from "../icons";
 
@@ -311,6 +312,8 @@ export function SettingsView({ config, save, onClose, push }: Props) {
           <p className="hint">PID, logs, session ledger and secret-like environment values are excluded. Import always starts with a dry-run.</p>
           <BackupPanel onApplied={(next) => { void save(next); }} push={push} />
         </div>
+
+        <UpdatePanel />
 
         <div className="set-group">
           <h3>App</h3>

@@ -42,7 +42,8 @@ Stack: Tauri v2, Rust 2021, React 19, strict TypeScript, and CSS. The root npm w
 | `launch.rs` | Validated loopback/Android Studio/Xcode launch targets. |
 | `timeline.rs` | Bounded structured timeline, disk rotation, local masking, diagnostics. |
 | `backup.rs` | Versioned config export, preview validation, selective import, pre-import backup. |
-| `updater.rs` | Update fetch/version logic and currently fail-closed signature gate. |
+| `updater.rs` | Manifest v1 canonical payload, Ed25519 verification, trusted keys and channel/version checks. |
+| `update_recovery.rs` | Startup recovery of the Node installer journal, OS lock, bundle hash and conservative rollback. |
 | `tools.rs` | Confirmed, escaped handoff to dev-finder and local Code Intelligence. |
 | `notify.rs`, `state.rs`, `commands.rs`, `lib.rs` | Notifications, shared state, IPC wrappers, app/tray/plugin wiring. |
 
@@ -121,7 +122,7 @@ In addition to core snapshot/config/service/Docker/log/app commands, the RC expo
 - Launch: `list_launch_targets`, `save_launch_target`, `open_launch_target`, `open_launch_when_ready`.
 - Timeline: `get_project_timeline`, `create_diagnostic_bundle`.
 - Backup: `export_settings_backup`, `preview_settings_import`, `apply_settings_import`.
-- Tools/update: dev-finder, Code Intelligence, and `check_for_update`.
+- Tools/update: dev-finder, Code Intelligence, and `check_for_update`, `get_install_recovery`.
 
 Events include snapshot/toast/pause/log/managed-exit and preset progress channels.
 
@@ -130,10 +131,10 @@ Events include snapshot/toast/pause/log/managed-exit and preset progress channel
 - Root `package.json`: private React/Tauri build workspace, version 1.0.1.
 - `installer/package.json`: publishable `@min0504/dev-cockpit`, version 1.0.1, exposing `install.js` as the npx binary.
 - Published npm installer: pinned unsigned v1.0.1 ZIP + SHA-256 + quarantine removal; only `--dir`/`--no-open`; replace-in-place with no rollback copy.
-- Checked-in RC installer source: adds legacy settings backup, previous-app rollback, and channel parsing, but is not the published 1.0.1 tarball and still points to v1.0.1.
+- RC installer 1.0.2: signed manifest v1 only; ZIP/tree hash verification, private staging, fsync/atomic journal, app renames and rollback. Settings and quarantine are untouched.
 - Release workflow: build → sign/notarize → ZIP/hash → manifest → pre-publish gates → GitHub Release.
 
-The workflow currently generates a placeholder manifest signature and the app contains a placeholder public key, so the pre-publish gate fails before release creation. The runtime verifier also fails closed even if a key merely has valid-looking formatting because real Ed25519 verification is not implemented.
+Rust and Node implement Ed25519 verification. The shared `installer/trusted-keys.json` is empty, so production updates/publishing remain blocked. Installer rerun and app startup verify the same journal to commit or roll back; ambiguous state/files are preserved and blocked. If interrupted between the two app renames, rerun the installer to restore the missing app path. See [SIGNING.md](SIGNING.md) for canonical bytes, migration and recovery limits.
 
 ## Security boundaries
 
@@ -146,4 +147,4 @@ The workflow currently generates a placeholder manifest signature and the app co
 
 ## Validation boundary
 
-Automated RC checks cover compilation, lint/tests, frontend type/build, process-group scenarios, identity recovery, loopback launch, preflight zero-start, masking, and backup validation. Full production GUI, installed-app relaunch, reboot, real signing/notarization, real Ed25519, and fresh-machine installation remain release blockers. Memory trends remain deferred.
+Automated RC checks cover compilation, lint/tests, frontend type/build, process-group scenarios, identity recovery, loopback launch, preflight zero-start, masking, and backup validation. Full production GUI, installed-app relaunch, reboot, real signing/notarization, production-key provisioning and fresh-machine installation remain release blockers. Ephemeral Ed25519, cross-runtime recovery, SIGKILL fault injection and update UI tests run in the existing suites. Memory trends remain deferred.

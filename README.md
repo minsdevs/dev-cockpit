@@ -13,7 +13,7 @@ The current release-candidate source implements the features documented below, a
 - Production `.app` GUI click-through and installed-app relaunch recovery are not fully verified.
 - A real Mac reboot recovery test has not been performed.
 - There is no valid Developer ID identity on the verification machine, so real signing, notarization, stapling, and Gatekeeper acceptance are unverified.
-- The updater has no production Ed25519 key or cryptographic verification dependency. It deliberately rejects every update manifest (fail-closed).
+- Rust/Node Ed25519 verification and interrupted-install recovery are implemented. The production trust store is empty, so online updates and publishing remain fail-closed.
 - Project memory trends and overload alerts remain deferred.
 
 See [Additional features and RC record](ADDITIONAL_FEATURES.md) and [Signing and distribution status](docs/SIGNING.md).
@@ -71,7 +71,7 @@ Options:
 npx @min0504/dev-cockpit@1.0.1 --help
 ```
 
-Manual unsigned installation is also possible from [GitHub Releases](https://github.com/Min0504/dev-cockpit/releases), but it has the same unsigned-artifact caveat.
+Manual unsigned installation is also possible from [GitHub Releases](https://github.com/minsdevs/dev-cockpit/releases), but it has the same unsigned-artifact caveat.
 
 ## Build and run
 
@@ -132,13 +132,13 @@ npm run build
 (cd src-tauri && cargo test --all-targets --all-features)
 ```
 
-The current RC record reports 92 Rust tests and 25 frontend tests passing, plus typecheck and production frontend build. These checks do not replace production GUI, reboot, signing/notarization, real Ed25519, or fresh-machine validation.
+The existing test commands include ephemeral Ed25519, tampering/interrupted installs, Node↔Rust recovery and update UI tests. Production GUI, actual reboot, signing/notarization, production-key provisioning and fresh-machine validation remain separate gates. See [SIGNING.md](docs/SIGNING.md) for the protocol and limits.
 
 ## Distribution policy
 
 - **Unsigned developer distribution:** source builds and the existing pinned 1.0.1 npx installer. Suitable only when the user understands the unsigned/quarantine-removal behavior.
 - **Formal macOS distribution:** Developer ID signed, Apple-notarized and stapled artifact plus a real Ed25519-signed update manifest verified by the app. Apple Developer Program membership is required for this formal Developer ID/notarization path, **not for npm publication itself**.
-- The current release workflow checks these requirements before creating a GitHub Release. Until credentials, entitlements, the Ed25519 key pair, and real crypto verification are configured, new signed releases are blocked fail-closed.
+- The current release workflow checks these requirements before creating a GitHub Release. Until credentials, entitlements, and production Ed25519 trust keys/signatures are configured, new signed releases are blocked fail-closed.
 
 ## License
 

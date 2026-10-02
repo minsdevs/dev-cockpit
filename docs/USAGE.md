@@ -39,7 +39,7 @@ Use this only as an unsigned developer distribution. See [SIGNING.md](SIGNING.md
 ### Build from source
 
 ```bash
-git clone https://github.com/Min0504/dev-cockpit.git
+git clone https://github.com/minsdevs/dev-cockpit.git
 cd dev-cockpit
 npm install
 npm run tauri build

@@ -42,7 +42,8 @@ Tauri v2, Rust 2021, React 19, strict TypeScript와 CSS를 사용합니다. 루�
 | `launch.rs` | 검증된 loopback/Android Studio/Xcode 실행 대상. |
 | `timeline.rs` | 상한 structured timeline, disk rotation, local masking, diagnostics. |
 | `backup.rs` | version config export, preview 검증, 선택 import, 이전 backup. |
-| `updater.rs` | update fetch/version logic과 현재 fail-closed signature gate. |
+| `updater.rs` | Manifest v1 canonical payload, Ed25519 검증, 신뢰키 및 채널/version 검사. |
+| `update_recovery.rs` | Node installer journal의 시작 시 복구, OS lock, bundle hash 및 보수적 rollback. |
 | `tools.rs` | 확인·escape 후 dev-finder와 local Code Intelligence로 전달. |
 | `notify.rs`, `state.rs`, `commands.rs`, `lib.rs` | 알림, 공유 상태, IPC wrapper, app/tray/plugin wiring. |
 
@@ -121,7 +122,7 @@ Live log buffer는 메모리에 있고 structured timeline event는 rotation과 
 - Launch: `list_launch_targets`, `save_launch_target`, `open_launch_target`, `open_launch_when_ready`.
 - Timeline: `get_project_timeline`, `create_diagnostic_bundle`.
 - Backup: `export_settings_backup`, `preview_settings_import`, `apply_settings_import`.
-- Tool/update: dev-finder, Code Intelligence, `check_for_update`.
+- Tool/update: dev-finder, Code Intelligence, `check_for_update`, `get_install_recovery`.
 
 Event는 snapshot/toast/pause/log/managed-exit와 preset progress channel을 포함합니다.
 
@@ -130,10 +131,10 @@ Event는 snapshot/toast/pause/log/managed-exit와 preset progress channel을 포
 - 루트 `package.json`: private React/Tauri build workspace, 1.0.1.
 - `installer/package.json`: publish 가능한 `@min0504/dev-cockpit` 1.0.1, `install.js`를 npx binary로 노출.
 - 게시된 npm installer: 고정 unsigned v1.0.1 ZIP + SHA-256 + quarantine 제거, `--dir`/`--no-open`만 지원, rollback copy 없이 교체.
-- 현재 RC installer source: legacy settings backup, previous-app rollback, channel parsing을 추가했지만 공개 1.0.1 tarball과 다르고 여전히 v1.0.1을 가리킴.
+- 현재 RC installer 1.0.2: 서명된 manifest v1만 허용. ZIP/tree hash 검증 후 private staging, fsync/atomic journal, 앱 rename, 실패 복원. 사용자 설정과 quarantine은 변경하지 않음.
 - Release workflow: build → sign/notarize → ZIP/hash → manifest → 게시 전 gate → GitHub Release.
 
-현재 workflow는 placeholder manifest signature를 만들고 앱에도 placeholder public key가 있으므로 게시 전 gate가 release 생성 전에 실패합니다. Runtime verifier도 실제 Ed25519가 구현되지 않아 key 형식만 그럴듯해도 fail-closed입니다.
+실제 Ed25519 검증은 Rust/Node 양쪽에 구현돼 있습니다. `installer/trusted-keys.json`은 비어 있어 운영 업데이트/게시는 차단됩니다. Installer 재실행과 앱 시작이 같은 journal을 검증해 완료 처리 또는 rollback합니다. 손상/누락된 기록과 알 수 없는 파일은 보존 후 차단합니다. 두 앱 rename 사이 중단돼 앱 경로가 없으면 installer 재실행으로 복원합니다. Canonical 규약·migration·복구 한계는 [SIGNING.md](SIGNING.md)를 참고하세요.
 
 ## 보안 경계
 
@@ -146,4 +147,4 @@ Event는 snapshot/toast/pause/log/managed-exit와 preset progress channel을 포
 
 ## 검증 경계
 
-자동 RC 검증은 compile, lint/test, frontend type/build, process-group scenario, identity recovery, loopback launch, preflight zero-start, masking, backup 검증을 다룹니다. production GUI, 설치 앱 relaunch, reboot, 실제 서명/공증, 실제 Ed25519, fresh-machine 설치는 release blocker입니다. 메모리 추세는 보류합니다.
+자동 RC 검증은 compile, lint/test, frontend type/build, process-group scenario, identity recovery, loopback launch, preflight zero-start, masking, backup 검증을 다룹니다. production GUI, 설치 앱 relaunch, reboot, 실제 서명/공증, 운영 key 등록, fresh-machine 설치는 검증 필요인 release blocker입니다. Ephemeral Ed25519, runtime 간 복구, SIGKILL fault injection과 업데이트 UI는 기존 test suite에서 검증합니다. 메모리 추세는 보류합니다.

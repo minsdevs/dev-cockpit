@@ -1,6 +1,6 @@
 # Dev Cockpit 서명·공증·업데이트 배포 상태
 
-기준일: 2026-08-24
+기준일: 2026-09-23
 
 이 문서는 기존 unsigned 개발자용 배포와 앞으로의 정식 서명 배포를 구분한다. 구현된 code path와 실제 credential로 검증된 배포를 같은 의미로 사용하지 않는다.
 
@@ -8,7 +8,7 @@
 
 - 기존 npm 배포 **`@min0504/dev-cockpit@1.0.1`**은 존재하며 unsigned 1.0.1 artifact installer다.
 - 해당 installer는 고정 SHA-256을 검사하고 `com.apple.quarantine`을 제거한다. SHA-256은 무결성 검사이지 publisher identity가 아니다.
-- 현재 repository의 release workflow는 새 GitHub Release를 fail-closed로 차단한다. Developer ID/공증 credential, entitlements, 실제 Ed25519 manifest signature, 앱 public key와 cryptographic verification이 준비되기 전에는 게시 gate를 통과할 수 없다.
+- 현재 repository의 release workflow는 새 GitHub Release를 fail-closed로 차단한다. Ed25519 검증·설치 복구는 구현했지만, 신뢰 공개키 목록은 비어 있다. Developer ID/공증 credential과 운영 공개키·서명이 준비되기 전에는 게시 gate를 통과할 수 없다.
 - Apple Developer Program은 Developer ID 서명과 Apple notarization을 사용하는 **정식 macOS artifact 배포**에 필요한 조건이다. npm package 게시 자체의 필수 조건이 아니다.
 
 ## Package 구분
@@ -16,7 +16,7 @@
 | 위치 | 이름/버전 | 역할 |
 | --- | --- | --- |
 | `/package.json` | `dev-cockpit` 1.0.1, `private: true` | React/Tauri 소스와 build script. npm installer로 publish하지 않음. |
-| `/installer/package.json` | `@min0504/dev-cockpit` 1.0.1 | npm에 게시하는 Node installer. `install.js`를 `dev-cockpit` binary로 제공. |
+| `/installer/package.json` | `@min0504/dev-cockpit` 1.0.2 (미게시 RC) | npm에 게시하는 Node installer. `install.js`를 `dev-cockpit` binary로 제공. |
 
 따라서 다음 명령은 installer package를 실행한다.
 
@@ -59,27 +59,15 @@ npx @min0504/dev-cockpit@1.0.1
 
 ### 현재 repository의 RC installer source
 
-현재 staged `installer/install.js`도 package version은 1.0.1이지만 공개 npm tarball과 byte가 다르다. 여기에 settings 보존/실패 복원, `Dev Cockpit.previous.app`, `--channel`, `--no-preserve`가 추가됐다. 다만 settings backup은 current backend config가 아닌 legacy `~/.config/dev-cockpit`을 대상으로 하고, channel 값은 다운로드 URL을 바꾸지 않는다. 새 npm version으로 게시되기 전까지 이 기능을 기존 `npx @min0504/dev-cockpit@1.0.1` 동작으로 설명하면 안 된다.
+현재 RC 1.0.2는 서명된 manifest v1만 허용한다. 공개 npm 1.0.1 동작은 바뀌지 않았다. 기존 flat/unsigned manifest로의 자동 fallback은 없으며 `--channel stable|beta`는 실제 feed를 선택한다. `--dir`/`--no-open`은 유지하고, `--no-preserve`는 오류로 안내한다. 설정과 사용자 데이터는 항상 건드리지 않는다. Quarantine도 제거하지 않는다.
 
 ## 현재 정식 release workflow
 
-`.github/workflows/release.yml`의 순서:
+`.github/workflows/release.yml`은 테스트 → Tauri app bundle → 기존 sign/notarize script → ZIP → Ed25519 manifest 생성 → 암호 검증 gate → Release 순서다. Beta는 version tag의 artifact를 사용하고 `beta` release에 검증된 manifest 포인터를 갱신한다.
 
-1. npm dependency와 frontend build.
-2. Rust release build와 `.app` 확인.
-3. `scripts/sign-and-notarize.sh` 실행 시도.
-4. ZIP과 SHA-256 생성.
-5. update manifest 생성.
-6. **GitHub Release 생성 전 gate**.
-7. gate 통과 시에만 Release 생성.
+`scripts/update-manifest.cjs`는 `UPDATE_SIGNING_KEY_PEM`(CI secret)을 메모리에서만 읽고, `UPDATE_KEY_ID`에 해당하는 공개키로 생성한 서명을 다시 검증한다. 키 파일을 만들지 않고 오류에 키나 stack trace를 출력하지 않는다. 게시 전 `verify` 명령이 manifest 서명, ZIP SHA-256, bundle SHA-256, bundle version을 재검사하고 `SIGNED=true`도 요구한다.
 
-게시 전 gate는 모두 필요하다.
-
-- `SIGNED=true`: signing script가 codesign, notarization, stapling, `spctl`까지 성공해야 함.
-- manifest signature가 placeholder가 아니어야 함.
-- 앱의 `UPDATE_PUBLIC_KEY`가 placeholder가 아니어야 함.
-
-현재 manifest 생성 단계는 placeholder signature를 쓰고 updater public key도 placeholder이므로 stable과 beta 모두 Release 생성 전에 실패한다. credentials가 없는 경우 signing을 건너뛴 뒤 `SIGNED=false`가 되어 역시 게시가 차단된다. 이 상태가 의도한 fail-closed 정책이다.
+**현재 `installer/trusted-keys.json`의 `keys`는 빈 객체다.** 운영 key/certificate는 생성·저장하지 않았다. Rust는 이 파일을 compile-time embed하고 Node installer는 같은 파일을 포함한다. 신뢰키가 없으므로 새 정식 배포와 온라인 업데이트는 계속 차단된다. Workflow 실행·외부 업로드는 수행하지 않았다.
 
 ## Signing script 상태
 
@@ -102,32 +90,56 @@ codesign --options runtime
 
 검증 환경에서는 `security find-identity -v -p codesigning` 결과가 `0 valid identities found`였고 실제 Developer ID 성공 경로를 실행하지 못했다. production app signing, notarization, stapling, `spctl` 성공과 별도 Mac Gatekeeper 허용은 **미검증**이다.
 
-## Ed25519 updater 상태
+## Manifest v1 서명 규약
 
-`src-tauri/src/updater.rs`에는 manifest 구조, 채널 URL, version 비교와 fail-closed gate가 있다.
+`updater.rs`는 `ed25519-dalek::VerifyingKey::verify_strict`, Node는 `crypto.verify(null, ...)`로 Ed25519를 검증한다. 기존 updater의 `UpdateInfo` IPC 형태는 유지한다.
 
-현재 상태:
+Envelope의 필수 필드: `schemaVersion: 1`, `algorithm: "Ed25519"`, `keyId`, `payload`, `signature`.
 
-- `UPDATE_PUBLIC_KEY`는 placeholder.
-- 실제 Ed25519 key pair를 repository/CI에 구성하지 않음.
-- `ed25519-dalek` 등 실제 cryptographic verification이 없음.
-- key가 placeholder이면 즉시 거부.
-- key 문자열 형식이 그럴듯해도 실제 crypto가 비활성이라 거부.
-- 빈 signature도 거부.
+Payload의 필수 필드와 순서:
 
-따라서 updater는 현재 모든 manifest를 거부한다. 이것은 “Ed25519 검증 완료”가 아니라 **검증 구현 전 update 비활성화**다.
+```text
+payloadVersion (=1), version, channel, platform (=darwin-aarch64),
+sha256, bundleSha256, downloadUrl, releaseNotes, publishedAt
+```
 
-정식 활성화 조건:
+서명 byte는 다음 순서 배열의 compact JSON 앞에 ASCII `dev-cockpit:update-manifest:v1`과 LF 한 개를 붙인 UTF-8이다. BOM·끝 줄바꿈·추가 공백은 없다. Unicode normalization은 하지 않는다. JSON string escaping은 JSON.stringify/serde_json 규칙이며 lone surrogate는 거부한다. 원본 envelope의 필드 순서·공백은 서명 결과에 영향을 주지 않는다.
 
-1. private key를 repository와 log 밖에서 생성·보관한다.
-2. matching public key만 앱에 넣는다.
-3. canonical manifest payload 형식을 정의한다.
-4. CI가 실제 private key로 manifest를 서명한다.
-5. 앱이 실제 Ed25519 library로 signature를 검증한다.
-6. 정상, 변조 manifest, 변조 artifact, wrong key, downgrade를 검증한다.
-7. artifact SHA-256 검증을 signature 검증 뒤 설치 경로에 연결한다.
+```text
+[schemaVersion, algorithm, keyId, payloadVersion, version, channel, platform,
+ sha256, bundleSha256, downloadUrl, releaseNotes, publishedAt]
+```
 
-실제 key로 성공한 update가 없으므로 real Ed25519는 **미검증**이다.
+- Public key는 raw 32 bytes, signature는 64 bytes를 RFC 4648 표준 padded Base64로 표현한다.
+- Version은 leading zero 없는 `major.minor.patch` 숫자 3개(각 9자리 이하)다. Beta는 별도 channel로 표현한다. `v` prefix/prerelease suffix는 v1에서 거부한다.
+- SHA-256은 lowercase hex 64자리다. URL은 해당 version의 `minsdevs/dev-cockpit` GitHub Release ZIP과 정확히 일치해야 한다. Timestamp는 `YYYY-MM-DDTHH:MM:SSZ` 형식이다.
+- 중복/추가/누락 필드, unsigned/legacy manifest, 알 수 없는 schema/algorithm/keyId, 잘못된 signature/key, channel 불일치, 64 KiB 초과를 거부한다. Release notes는 16 KiB 이하이다.
+- 신뢰키는 release source에 공개키만 등록한다. 런타임 manifest/환경변수/CLI에서 새 trust root를 받아들이지 않는다. 키 교체는 이전 journal 검증에 필요한 공개키도 포함한 앱·installer 배포가 선행돼야 한다.
+
+## 앱 내용과 설치 복구
+
+`bundleSha256`은 루트 `.`부터 경로를 UTF-8 byte 순서로 정렬한 preorder tree hash다. 각 entry를 `종류 NUL 상대경로 NUL (mode & 0777)의 십진수 NUL 내용 LF`로 연결해 SHA-256한다. 종류는 `d`/`f`/`l`, 내용은 directory의 빈 문자열, file의 SHA-256 hex, symlink의 target 문자열이다. Symlink를 따라 순회하지 않고 bundle 밖/깨진 link, control character, special file/hardlink를 거부한다. 실제 ZIP v1은 더 좁게 file/directory만 허용하며 link, ZIP64, encryption, 경로 탈출, 중복 경로를 압축 해제 전에 거부한다. Framework symlink가 필요한 향후 bundle은 이 제한의 별도 설계·검증이 필요하다. ZIP 최대 512 MiB, bundle 최대 2 GiB/100,000 entries이다.
+
+`installer/transaction.js`와 `src-tauri/src/update_recovery.rs`는 설치 디렉터리의 `.dev-cockpit-update/state.json` schema 1을 공유한다. 각 transaction은 무작위 ID로 별도 directory를 만들고 과거 backup을 덮어쓰지 않는다. 경로를 journal에서 직접 읽지 않으며, symlink state/비정상 소유권을 거부한다.
+
+```text
+preparing → prepared → applying → applied → committed
+오류/불완전 작업 → failed/rollingBack → rolledBack
+```
+
+1. 서명 검증 후에만 ZIP을 다운로드하고 SHA-256 확인 후 private staging에 압축을 푼다.
+2. 앱 내용·version 검증, 파일 fsync, journal의 임시 파일 + fsync + atomic rename을 거친다.
+3. 기존 앱은 transaction의 `previous.app`으로 rename하고 검증한 stage를 앱 위치로 rename한다. 각 rename 후 부모 directory를 fsync한다. 두 rename 사이에는 앱 경로가 잠시 없을 수 있지만 이전 앱은 보존된다.
+4. 적용 완료 전 실패하면 이전 hash를 확인해 복원한다. 이미 교체된 새 앱도 `rejected.app`으로 보존한다. 알 수 없는 파일이나 손상된 기록은 추측으로 삭제/덮어쓰지 않고 작업을 차단한다.
+5. Installer 시작은 네트워크보다 먼저 복구한다. 설치된 앱 시작도 별도 worker에서 복구하며 GUI Settings에 결과를 표시한다. Source/debug 실행은 설치 경로를 추측하지 않는다.
+6. 새 앱이 이미 교체된 경우 서명과 bundle hash를 다시 검증해 완료 처리한다. 미완료 staging은 보수적으로 rollback한다. 완료한 동일 버전은 다운로드/압축 해제를 반복하지 않고 downgrade와 같은 버전의 다른 artifact를 차단한다.
+7. Node `lockf`와 Rust `flock`이 같은 OS lock을 공유한다. 강제 종료·재부팅은 lock을 해제하므로 PID/stale timeout 추측이 없다.
+
+OS 재부팅 후 자동 background 설치 서비스는 추가하지 않는다. 앱 경로가 없는 중단 지점에서는 **installer를 다시 실행하면 네트워크 없이 이전 앱을 복원**한다. 앱이 존재하면 다음 앱 실행에서 복구한다. 기록 손상/누락 + orphan transaction은 보존 후 차단하므로 수동 점검이 필요하다. 완성된 transaction/ZIP/backup은 자동 삭제하지 않아 디스크 사용량이 누적될 수 있다.
+
+테스트는 ephemeral key를 메모리에서만 만들며 private key fixture는 없다. 실제 SIGKILL 7지점, 새 Node 프로세스, Rust startup recovery, failed apply/rollback, repeated execution, corrupt/missing state, Node↔Rust canonical bytes/hash를 기존 `npm test`/`cargo test --all-targets --all-features`에서 검증한다. 실제 OS reboot/power loss/설치된 production app 성공은 **검증 필요**다.
+
+이 보호는 네트워크·artifact·중단 복구를 대상으로 한다. 같은 사용자/root 권한으로 앱·신뢰키·journal을 동시에 바꿀 수 있는 공격자까지 방어하는 sandbox나 Apple code signing 대체 수단은 아니다. 최초 설치의 version baseline은 기존 앱 plist에 의존하며 서버 freeze 방지/외부 monotonic version 저장소는 없다.
 
 ## Unsigned 개발자용 배포와 정식 배포
 
@@ -150,11 +162,9 @@ Apple Developer Program 요구사항은 이 정식 macOS 경로에만 연결해 
 
 ## RC 승인 전 남은 검증
 
-- production `.app` 전체 GUI click-through.
-- 설치 앱 relaunch recovery와 실제 reboot recovery.
-- Developer ID codesign/notarytool/stapler/spctl 성공.
-- 별도/fresh Mac에서 quarantine을 수동 제거하지 않은 Gatekeeper 실행.
-- 실제 Ed25519 정상·변조·wrong-key·downgrade chain.
-- 정식 installer의 install/update/previous-version rollback.
+- 운영 공개키 등록과 실제 release key를 통한 CI 연동: **검증 필요** (현재 trust store 비어 있음).
+- Developer ID codesign/notarytool/stapler/spctl 및 확정 entitlements: **검증 필요**.
+- Production `.app` 전체 GUI, 실제 reboot/power-loss, fresh Mac Gatekeeper, install/update/rollback: **검증 필요**.
+- 키 rotation/revocation 운영 절차, retained backup 정리 정책, 기존 unsigned 설치의 migration 실험: **검증 필요**.
 
-위 gate가 끝나기 전에는 현재 상태를 **로컬 소스/unsigned 개발자 사용 가능, 새 정식 release와 updater 배포 차단**으로 표현한다.
+현재 상태는 **로컬 암호 검증·중단 복구 구현 및 simulation 검증 완료, 운영 배포 차단**이다. Runtime 서명 검증은 [ed25519-dalek 공식 문서](https://docs.rs/ed25519-dalek/2.2.0/ed25519_dalek/struct.VerifyingKey.html#method.verify_strict)와 [Node crypto API](https://nodejs.org/api/crypto.html#cryptoverifyalgorithm-data-key-signature-callback)를 따른다.

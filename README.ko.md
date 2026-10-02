@@ -13,7 +13,7 @@ macOS 메뉴바에 상주하는 로컬 개발 환경 대시보드입니다.
 - production `.app` GUI 전체 click-through와 설치 앱 재실행 복구를 끝까지 검증하지 못했습니다.
 - 실제 Mac 재부팅 후 복구는 수행하지 않았습니다.
 - 검증 Mac에 유효한 Developer ID가 없어 실제 서명·공증·스테이플·Gatekeeper 허용 경로가 미검증입니다.
-- updater에는 production Ed25519 키와 실제 암호 검증 의존성이 없습니다. 모든 update manifest를 의도적으로 거부하는 fail-closed 상태입니다.
+- Rust/Node Ed25519 검증과 중단된 설치 복구는 구현했습니다. Production 신뢰 공개키 목록은 비어 있어 운영 업데이트·배포는 fail-closed로 차단합니다.
 - 프로젝트별 메모리 추세와 과부하 알림은 계속 보류합니다.
 
 [추가 기능 및 RC 기록](ADDITIONAL_FEATURES.md)과 [서명·배포 상태](docs/SIGNING.md)를 참고하세요.
@@ -71,7 +71,7 @@ npx @min0504/dev-cockpit@1.0.1
 npx @min0504/dev-cockpit@1.0.1 --help
 ```
 
-[GitHub Releases](https://github.com/Min0504/dev-cockpit/releases)에서 수동 설치할 수도 있지만 기존 artifact가 unsigned라는 제약은 같습니다.
+[GitHub Releases](https://github.com/minsdevs/dev-cockpit/releases)에서 수동 설치할 수도 있지만 기존 artifact가 unsigned라는 제약은 같습니다.
 
 ## 빌드와 실행
 
@@ -132,13 +132,13 @@ npm run build
 (cd src-tauri && cargo test --all-targets --all-features)
 ```
 
-현재 RC 기록은 Rust 92개, frontend 25개 테스트, typecheck와 production frontend build 통과입니다. 이는 production GUI, reboot, 서명/공증, 실제 Ed25519, fresh-machine 검증을 대신하지 않습니다.
+기존 테스트 명령에 ephemeral Ed25519, 변조/중단 설치, Node↔Rust 복구 및 업데이트 UI 테스트가 포함됩니다. Production GUI, 실제 reboot, 서명/공증, 운영 key provisioning, fresh-machine 검증은 별도로 필요합니다. 규약과 제한은 [SIGNING.md](docs/SIGNING.md)를 참고하세요.
 
 ## 배포 정책
 
 - **Unsigned 개발자용 배포:** 소스 빌드와 기존 고정 1.0.1 npx installer. unsigned/quarantine 제거 동작을 이해한 사용자를 위한 경로입니다.
 - **정식 macOS 배포:** Developer ID 서명, Apple 공증·스테이플 artifact와 앱이 실제 검증하는 Ed25519 서명 update manifest가 필요합니다. Apple Developer Program은 이 정식 Developer ID/공증 경로의 요구사항이며, **npm package 게시 자체의 요구사항이 아닙니다.**
-- 현재 release workflow는 GitHub Release 생성 전에 위 조건을 검사합니다. credentials, entitlements, Ed25519 key pair와 실제 crypto 검증이 준비될 때까지 새 signed release를 fail-closed로 차단합니다.
+- 현재 release workflow는 GitHub Release 생성 전에 위 조건을 검사합니다. credentials, entitlements와 운영 Ed25519 신뢰키·서명이 준비될 때까지 새 signed release를 fail-closed로 차단합니다.
 
 ## 라이선스
 

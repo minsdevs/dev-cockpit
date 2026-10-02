@@ -1,25 +1,27 @@
-//! Update checking with signed manifest verification.
-//!
-//! SECURITY POSTURE: fail-closed.
-//! - If UPDATE_PUBLIC_KEY is a placeholder, empty, or invalid → reject ALL updates.
-//! - If cryptographic verification is not available (no ed25519 dependency) → reject ALL updates.
-//! - Updates are NEVER trusted without a valid key AND a verified signature.
-//!
-//! Status:
-//! - ⏸ Ed25519 signature verification: fail-closed (requires ed25519-dalek + real key)
-//! - ⏸ Apple code signing: requires Developer ID certificate
-//! - ⏸ Apple notarization: requires active Apple Developer account
-
+//! Ed25519 manifest v1. Legacy flat/unsigned manifests are intentionally rejected.
+use base64::{engine::general_purpose::STANDARD, Engine};
+use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use tokio::io::AsyncReadExt;
 
 const MANIFEST_URL_STABLE: &str =
-    "https://github.com/Min0504/dev-cockpit/releases/latest/download/update-manifest.json";
+    "https://github.com/minsdevs/dev-cockpit/releases/latest/download/update-manifest.json";
 const MANIFEST_URL_BETA: &str =
-    "https://github.com/Min0504/dev-cockpit/releases/download/beta/update-manifest.json";
+    "https://github.com/minsdevs/dev-cockpit/releases/download/beta/update-manifest.json";
+pub const MAX_MANIFEST_BYTES: usize = 65536;
+pub type TrustedKeys = BTreeMap<String, String>;
 
-/// Public key for verifying update manifest signatures (ed25519).
-/// 🟡 Placeholder — replace with actual public key when generated.
-const UPDATE_PUBLIC_KEY: &str = "PLACEHOLDER_ED25519_PUBLIC_KEY_BASE64";
+pub fn trusted_keys() -> Result<TrustedKeys, String> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Store {
+        keys: TrustedKeys,
+    }
+    serde_json::from_str::<Store>(include_str!("../../installer/trusted-keys.json"))
+        .map(|store| store.keys)
+        .map_err(|_| "key_unknown".into())
+}
 
 /// Information about an available update.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -33,253 +35,289 @@ pub struct UpdateInfo {
     pub published_at: Option<String>,
 }
 
-/// The signed manifest fetched from the update server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateManifest {
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManifestPayload {
+    pub payload_version: u32,
     pub version: String,
     pub channel: String,
+    pub platform: String,
     pub sha256: String,
+    pub bundle_sha256: String,
     pub download_url: String,
     pub release_notes: String,
-    pub published_at: Option<String>,
-    /// Base64-encoded ed25519 signature of the manifest content (excluding this field).
+    pub published_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateManifest {
+    pub schema_version: u32,
+    pub algorithm: String,
+    pub key_id: String,
+    pub payload: ManifestPayload,
     pub signature: String,
 }
 
-/// Current app version (from Cargo.toml).
-fn current_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+pub fn valid_hash(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// Compare semantic versions. Returns true if `remote` is newer than `local`.
-fn is_newer(remote: &str, local: &str) -> bool {
-    let parse = |v: &str| -> Vec<u64> {
-        v.trim_start_matches('v')
-            .split('.')
-            .filter_map(|s| s.parse().ok())
-            .collect()
-    };
-    let r = parse(remote);
-    let l = parse(local);
-    r > l
+pub fn version_parts(value: &str) -> Result<[u32; 3], String> {
+    let parts: Vec<_> = value.split('.').collect();
+    if parts.len() != 3 {
+        return Err("manifest_invalid".into());
+    }
+    let mut result = [0; 3];
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty()
+            || part.len() > 9
+            || !part.bytes().all(|b| b.is_ascii_digit())
+            || (part.len() > 1 && part.starts_with('0'))
+        {
+            return Err("manifest_invalid".into());
+        }
+        result[i] = part.parse().map_err(|_| "manifest_invalid")?;
+    }
+    Ok(result)
 }
 
-/// Check for updates by fetching and verifying the signed manifest.
-///
-/// Returns `Ok(Some(info))` if an update is available, `Ok(None)` if current,
-/// or `Err` if the check failed (network error, invalid signature, etc.).
+impl UpdateManifest {
+    /// Domain + compact ordered JSON array, UTF-8, no BOM/trailing newline.
+    /// This is a fixed schema, not general-purpose JSON canonicalization.
+    pub fn canonical_payload(&self) -> Result<Vec<u8>, String> {
+        let p = &self.payload;
+        if self.algorithm != "Ed25519" {
+            return Err("algorithm_unsupported".into());
+        }
+        let timestamp = p.published_at.as_bytes();
+        let valid_time = timestamp.len() == 20
+            && timestamp.iter().enumerate().all(|(i, b)| match i {
+                4 | 7 => *b == b'-',
+                10 => *b == b'T',
+                13 | 16 => *b == b':',
+                19 => *b == b'Z',
+                _ => b.is_ascii_digit(),
+            });
+        if self.schema_version != 1
+            || p.payload_version != 1
+            || self.key_id.is_empty()
+            || self.key_id.len() > 64
+            || !self
+                .key_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            || !matches!(p.channel.as_str(), "stable" | "beta")
+            || p.platform != "darwin-aarch64"
+            || !valid_hash(&p.sha256)
+            || !valid_hash(&p.bundle_sha256)
+            || p.release_notes.len() > 16384
+            || !valid_time
+        {
+            return Err("manifest_invalid".into());
+        }
+        version_parts(&p.version)?;
+        let expected = format!("https://github.com/minsdevs/dev-cockpit/releases/download/v{0}/Dev-Cockpit-{0}-macos-aarch64.zip", p.version);
+        if p.download_url != expected {
+            return Err("manifest_invalid".into());
+        }
+        let array = serde_json::json!([
+            self.schema_version,
+            self.algorithm,
+            self.key_id,
+            p.payload_version,
+            p.version,
+            p.channel,
+            p.platform,
+            p.sha256,
+            p.bundle_sha256,
+            p.download_url,
+            p.release_notes,
+            p.published_at
+        ]);
+        Ok(format!("dev-cockpit:update-manifest:v1\n{}", array).into_bytes())
+    }
+}
+
+pub fn verify_manifest(
+    body: &str,
+    keys: &TrustedKeys,
+    channel: Option<&str>,
+) -> Result<UpdateManifest, String> {
+    if body.len() > MAX_MANIFEST_BYTES {
+        return Err("manifest_invalid".into());
+    }
+    // Typed deserialization rejects duplicate/unknown fields and missing signature.
+    let manifest: UpdateManifest = serde_json::from_str(body).map_err(|_| "manifest_invalid")?;
+    let bytes = manifest.canonical_payload()?;
+    let encoded = keys.get(&manifest.key_id).ok_or("key_unknown")?;
+    let raw = STANDARD.decode(encoded).map_err(|_| "key_unknown")?;
+    if STANDARD.encode(&raw) != *encoded {
+        return Err("key_unknown".into());
+    }
+    let raw: [u8; 32] = raw.try_into().map_err(|_| "key_unknown")?;
+    let key = VerifyingKey::from_bytes(&raw).map_err(|_| "key_unknown")?;
+    let raw_sig = STANDARD
+        .decode(&manifest.signature)
+        .map_err(|_| "signature_invalid")?;
+    if STANDARD.encode(&raw_sig) != manifest.signature {
+        return Err("signature_invalid".into());
+    }
+    let signature = Signature::from_slice(&raw_sig).map_err(|_| "signature_invalid")?;
+    key.verify_strict(&bytes, &signature)
+        .map_err(|_| "signature_invalid")?;
+    if channel.is_some_and(|ch| ch != manifest.payload.channel) {
+        return Err("channel_mismatch".into());
+    }
+    Ok(manifest)
+}
+
 pub async fn check_update(channel: &str) -> Result<Option<UpdateInfo>, String> {
     let url = match channel {
+        "stable" => MANIFEST_URL_STABLE,
         "beta" => MANIFEST_URL_BETA,
-        _ => MANIFEST_URL_STABLE,
+        _ => return Err("channel_mismatch".into()),
     };
-
-    // Fetch manifest
-    // Note: In production this uses reqwest or similar; here we use a minimal
-    // approach that works within Tauri's async runtime.
+    let keys = trusted_keys()?;
+    if keys.is_empty() {
+        return Err("key_unknown".into());
+    }
     let body = fetch_manifest(url).await?;
-
-    // Parse manifest
-    let manifest: UpdateManifest =
-        serde_json::from_str(&body).map_err(|e| format!("invalid update manifest: {e}"))?;
-
-    // Verify signature (🟡 requires actual public key)
-    verify_signature(&manifest)?;
-
-    // Compare versions
-    if !is_newer(&manifest.version, current_version()) {
+    let manifest = verify_manifest(&body, &keys, Some(channel))?;
+    let p = manifest.payload;
+    if version_parts(&p.version)? <= version_parts(env!("CARGO_PKG_VERSION"))? {
         return Ok(None);
     }
-
     Ok(Some(UpdateInfo {
-        version: manifest.version,
-        channel: manifest.channel,
-        release_notes: manifest.release_notes,
-        download_url: manifest.download_url,
-        sha256: manifest.sha256,
-        published_at: manifest.published_at,
+        version: p.version,
+        channel: p.channel,
+        release_notes: p.release_notes,
+        download_url: p.download_url,
+        sha256: p.sha256,
+        published_at: Some(p.published_at),
     }))
 }
 
-/// Fetch the manifest JSON from the given URL.
 async fn fetch_manifest(url: &str) -> Result<String, String> {
-    // Use std::process::Command to call curl as a simple HTTP client
-    // (avoids adding reqwest dependency; Tauri apps can use this pattern)
-    let output = tokio::process::Command::new("curl")
-        .args(["-sSfL", "--max-time", "15", url])
-        .output()
+    // Bound even a chunked response; never surface curl stderr/URLs to UI/logs.
+    let mut child = tokio::process::Command::new("/usr/bin/curl")
+        .args([
+            "--disable",
+            "-sSfL",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--max-time",
+            "15",
+            "--max-filesize",
+            "65536",
+            url,
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|_| "network_failed")?;
+    let stdout = child.stdout.take().ok_or("network_failed")?;
+    let mut bytes = Vec::new();
+    stdout
+        .take((MAX_MANIFEST_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
         .await
-        .map_err(|e| format!("failed to fetch update manifest: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("update check failed: {}", stderr.trim()));
+        .map_err(|_| "network_failed")?;
+    if bytes.len() > MAX_MANIFEST_BYTES {
+        return Err("manifest_invalid".into());
     }
-
-    String::from_utf8(output.stdout).map_err(|e| format!("invalid manifest encoding: {e}"))
-}
-
-/// Returns `true` if the public key is a known placeholder, empty, or clearly
-/// not a valid base64-encoded 32-byte ed25519 public key.
-fn is_key_invalid(key: &str) -> bool {
-    let trimmed = key.trim();
-    if trimmed.is_empty() {
-        return true;
+    if !child.wait().await.map_err(|_| "network_failed")?.success() {
+        return Err("network_failed".into());
     }
-    // Reject known placeholder sentinel values
-    const PLACEHOLDERS: &[&str] = &[
-        "PLACEHOLDER_ED25519_PUBLIC_KEY_BASE64",
-        "REPLACE_ME",
-        "TODO",
-        "CHANGEME",
-    ];
-    if PLACEHOLDERS.iter().any(|p| trimmed.eq_ignore_ascii_case(p)) {
-        return true;
-    }
-    // A valid base64-encoded 32-byte key is exactly 44 chars (with padding).
-    // Reject anything that clearly cannot be valid base64 of the right length.
-    if trimmed.len() < 40 || trimmed.len() > 48 {
-        return true;
-    }
-    // Reject if it contains non-base64 characters
-    let is_base64_char = |c: char| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=';
-    if !trimmed.chars().all(is_base64_char) {
-        return true;
-    }
-    false
-}
-
-/// Verify the ed25519 signature of the manifest.
-///
-/// SECURITY: This function is fail-closed. If the public key is not configured
-/// (placeholder, empty, or invalid format), verification ALWAYS fails and
-/// returns an error. Updates are never trusted without a valid key + signature.
-///
-/// ⏸ Actual cryptographic ed25519 verification is disabled because no signing
-/// key pair has been generated and the ed25519-dalek dependency is not present.
-/// When a real key is provisioned and the crypto dependency added, the TODO
-/// block below should be completed.
-fn verify_signature(manifest: &UpdateManifest) -> Result<(), String> {
-    // FAIL-CLOSED: reject if key is not properly configured
-    if is_key_invalid(UPDATE_PUBLIC_KEY) {
-        return Err(
-            "업데이트 검증 불가: 공개키 미설정. 서명 검증이 구성되기 전까지 업데이트를 설치할 수 없습니다.".into()
-        );
-    }
-
-    // Reject empty signatures unconditionally
-    if manifest.signature.is_empty() {
-        return Err("update manifest has no signature".into());
-    }
-
-    // TODO: When ed25519-dalek is added as a dependency, implement:
-    // 1. Decode the public key from base64
-    // 2. Reconstruct the signed payload (manifest without signature field)
-    // 3. Decode the signature from base64
-    // 4. Verify using ed25519-dalek:
-    //    let key_bytes = base64_decode(UPDATE_PUBLIC_KEY)?;
-    //    let public_key = VerifyingKey::from_bytes(&key_bytes)?;
-    //    let sig_bytes = base64_decode(&manifest.signature)?;
-    //    let signature = Signature::from_bytes(&sig_bytes);
-    //    public_key.verify(payload.as_bytes(), &signature)?;
-    //
-    // Until then, this function rejects ALL manifests (fail-closed).
-    Err(
-        "업데이트 검증 불가: 서명 검증 기능이 아직 활성화되지 않았습니다 (crypto 의존성 미구성)."
-            .into(),
-    )
+    String::from_utf8(bytes).map_err(|_| "manifest_invalid".into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+    use rand_core::{OsRng, RngCore};
 
-    #[test]
-    fn version_comparison() {
-        assert!(is_newer("1.1.0", "1.0.1"));
-        assert!(is_newer("2.0.0", "1.9.9"));
-        assert!(is_newer("1.0.2", "1.0.1"));
-        assert!(!is_newer("1.0.1", "1.0.1"));
-        assert!(!is_newer("1.0.0", "1.0.1"));
-        assert!(is_newer("v1.1.0", "1.0.1"));
+    pub(super) fn signed() -> (UpdateManifest, TrustedKeys) {
+        let mut seed = [0u8; 32];
+        OsRng.fill_bytes(&mut seed);
+        let key = SigningKey::from_bytes(&seed);
+        seed.fill(0);
+        let mut m = UpdateManifest { schema_version: 1, algorithm: "Ed25519".into(),
+            key_id: "ephemeral".into(), signature: String::new(), payload: ManifestPayload {
+                payload_version: 1, version: "2.0.0".into(), channel: "stable".into(),
+                platform: "darwin-aarch64".into(), sha256: "a".repeat(64), bundle_sha256: "b".repeat(64),
+                download_url: "https://github.com/minsdevs/dev-cockpit/releases/download/v2.0.0/Dev-Cockpit-2.0.0-macos-aarch64.zip".into(),
+                release_notes: "한글 \"safe\"\n🛠".into(), published_at: "2026-09-23T00:00:00Z".into(),
+            }};
+        m.signature = STANDARD.encode(key.sign(&m.canonical_payload().unwrap()).to_bytes());
+        (
+            m,
+            BTreeMap::from([(
+                "ephemeral".into(),
+                STANDARD.encode(key.verifying_key().as_bytes()),
+            )]),
+        )
     }
-
-    fn make_manifest(sig: &str) -> UpdateManifest {
-        UpdateManifest {
-            version: "2.0.0".into(),
-            channel: "stable".into(),
-            sha256: "abc123def456".into(),
-            download_url: "https://example.com/app.zip".into(),
-            release_notes: "New features".into(),
-            published_at: None,
-            signature: sig.into(),
+    fn verify(m: &UpdateManifest, keys: &TrustedKeys) -> Result<UpdateManifest, String> {
+        verify_manifest(&serde_json::to_string(m).unwrap(), keys, Some("stable"))
+    }
+    #[test]
+    fn valid_manifest_verification_and_field_order() {
+        let (m, keys) = signed();
+        assert!(verify(&m, &keys).is_ok());
+        let reordered = serde_json::to_string_pretty(&serde_json::to_value(&m).unwrap()).unwrap();
+        assert!(verify_manifest(&reordered, &keys, None).is_ok());
+    }
+    #[test]
+    fn tampering_wrong_signature_wrong_key_and_unknown_key() {
+        let (m, keys) = signed();
+        let mut tampered = m.clone();
+        tampered.payload.release_notes.push('!');
+        assert_eq!(verify(&tampered, &keys).unwrap_err(), "signature_invalid");
+        tampered = m.clone();
+        tampered.signature = STANDARD.encode([0u8; 64]);
+        assert!(verify(&tampered, &keys).is_err());
+        let (_, wrong) = signed();
+        assert!(verify(&m, &wrong).is_err());
+        assert_eq!(verify(&m, &BTreeMap::new()).unwrap_err(), "key_unknown");
+    }
+    #[test]
+    fn malformed_unsigned_algorithm_schema_and_channel_rejected() {
+        let (m, keys) = signed();
+        for input in ["{}", "null", "{", "{\"version\":\"1.0.1\"}"] {
+            assert!(verify_manifest(input, &keys, None).is_err());
         }
+        let mut value = serde_json::to_value(&m).unwrap();
+        value.as_object_mut().unwrap().remove("signature");
+        assert!(verify_manifest(&value.to_string(), &keys, None).is_err());
+        let mut bad = m.clone();
+        bad.algorithm = "none".into();
+        assert_eq!(verify(&bad, &keys).unwrap_err(), "algorithm_unsupported");
+        bad = m.clone();
+        bad.schema_version = 2;
+        assert!(verify(&bad, &keys).is_err());
+        bad = m.clone();
+        bad.payload.payload_version = 2;
+        assert!(verify(&bad, &keys).is_err());
+        assert!(verify_manifest(&serde_json::to_string(&m).unwrap(), &keys, Some("beta")).is_err());
+        let duplicate =
+            serde_json::to_string(&m)
+                .unwrap()
+                .replacen("{", "{\"schemaVersion\":1,", 1);
+        assert!(verify_manifest(&duplicate, &keys, None).is_err());
     }
-
     #[test]
-    fn placeholder_key_rejects_manifest() {
-        // The current UPDATE_PUBLIC_KEY is a placeholder.
-        // verify_signature MUST fail (fail-closed).
-        let manifest = make_manifest("dGVzdC1zaWduYXR1cmU=");
-        let result = verify_signature(&manifest);
-        assert!(result.is_err());
-        assert!(
-            result.unwrap_err().contains("공개키 미설정"),
-            "error must mention unconfigured key"
-        );
-    }
-
-    #[test]
-    fn empty_signature_rejected() {
-        // Even if we somehow bypass the key check, empty sig must fail.
-        let manifest = make_manifest("");
-        let result = verify_signature(&manifest);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn is_key_invalid_detects_placeholders() {
-        assert!(is_key_invalid("PLACEHOLDER_ED25519_PUBLIC_KEY_BASE64"));
-        assert!(is_key_invalid("REPLACE_ME"));
-        assert!(is_key_invalid("TODO"));
-        assert!(is_key_invalid("CHANGEME"));
-        assert!(is_key_invalid(""));
-        assert!(is_key_invalid("   "));
-        assert!(is_key_invalid("too_short"));
-        // Non-base64 characters
-        assert!(is_key_invalid(
-            "!@#$%^&*()!@#$%^&*()!@#$%^&*()!@#$%^&*()!@#$"
-        ));
-    }
-
-    #[test]
-    fn is_key_invalid_accepts_valid_format() {
-        // 44-char base64 that looks like a valid 32-byte key
-        let valid_looking = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-        assert_eq!(valid_looking.len(), 44);
-        assert!(!is_key_invalid(valid_looking));
-    }
-
-    #[test]
-    fn verify_signature_fails_closed_with_valid_format_key() {
-        // Even with a key that passes format checks, crypto verification
-        // is not implemented, so it must still reject (the second fail-closed path).
-        // This test documents that the function never returns Ok without real crypto.
-        let manifest = make_manifest("dGVzdC1zaWduYXR1cmU=");
-        let result = verify_signature(&manifest);
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn check_for_update_rejects_unverified_manifest() {
-        // Simulate the full flow: even if we could fetch a manifest,
-        // the placeholder key means check_update should propagate the error.
-        // We can't actually fetch here, but verify the verification gate works
-        // by calling verify_signature directly — which is what check_update uses.
-        let manifest = make_manifest("c2lnbmVk");
-        let err = verify_signature(&manifest).unwrap_err();
-        // The error must prevent UpdateInfo from being returned
-        assert!(!err.is_empty());
+    fn strict_versions() {
+        assert!(version_parts("1.10.0").unwrap() > version_parts("1.9.9").unwrap());
+        for v in ["v1.0.1", "1.0", "1.0.1-beta", "01.0.0", "1.0.x"] {
+            assert!(version_parts(v).is_err());
+        }
     }
 }
