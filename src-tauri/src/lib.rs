@@ -93,17 +93,6 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
-        .plugin(
-            tauri_plugin_global_shortcut::Builder::new()
-                .with_shortcuts(["ctrl+alt+d"])
-                .expect("register shortcut")
-                .with_handler(|app, _shortcut, event| {
-                    if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                        toggle_panel(app, None);
-                    }
-                })
-                .build(),
-        )
         .manage(AppState::new(app_config))
         .manage(update_recovery::RecoveryStatus(std::sync::Mutex::new(
             "recovering".into(),
@@ -218,7 +207,7 @@ pub fn run() {
 }
 
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, "open", "Open Dev Cockpit", true, Some("ctrl+alt+d"))?;
+    let open = MenuItem::with_id(app, "open", "Open Dev Cockpit", true, None::<&str>)?;
     let scan = MenuItem::with_id(app, "scan", "Rescan Now", true, None::<&str>)?;
     let pause =
         CheckMenuItem::with_id(app, "pause", "Pause Monitoring", true, false, None::<&str>)?;

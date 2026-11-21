@@ -319,7 +319,7 @@ export function SettingsView({ config, save, onClose, push }: Props) {
           <h3>App</h3>
           <div className="set-row">
             <label>
-              Dev Cockpit 1.0.0 <span className="hint">· ⌃⌥D toggles the panel</span>
+              Dev Cockpit 1.0.0 <span className="hint">· Open from the menu-bar icon</span>
             </label>
             <button
               className="text-btn"
