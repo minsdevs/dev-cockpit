@@ -55,11 +55,11 @@ This does not by itself produce a Developer ID signed or notarized artifact.
 
 ## 2. Open and navigate
 
-After launch, use the menu-bar gauge icon or `⌃⌥D`.
+After launch, use the menu-bar gauge icon.
 
 | Key/action | Result |
 | --- | --- |
-| `⌃⌥D` | Toggle the panel globally |
+| Menu-bar gauge icon | Toggle the panel |
 | `/` or `⌘F` | Focus search |
 | `Esc` | Close the current sheet, clear search, then hide the panel |
 | Pin | Keep the panel visible on focus loss |

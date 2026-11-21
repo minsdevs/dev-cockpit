@@ -90,7 +90,7 @@ A local source build is an unsigned developer build unless you separately config
 
 | Action | How |
 | --- | --- |
-| Toggle panel | Menu-bar icon or `⌃⌥D` |
+| Toggle panel | Menu-bar icon |
 | Search | `/` or `⌘F` |
 | Close/back | `Esc` |
 | Force-stop a service | `⌥`-click Stop |
